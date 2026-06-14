@@ -415,6 +415,7 @@ func startFFmpeg(id, quality, maxW int) (*ffSession, int, int) {
 		"-hide_banner", "-loglevel", "error",
 		"-sws_flags", "fast_bilinear",
 		"-f", device, "-framerate", "60", // 最大 60fps，超过会导致 CPU 100% 卡死
+		"-draw_mouse", "0", // 不捕获光标，消除闪烁
 		"-offset_x", strconv.Itoa(capX),
 		"-offset_y", strconv.Itoa(capY),
 		"-video_size", fmt.Sprintf("%dx%d", capW, capH),
