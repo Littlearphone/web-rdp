@@ -219,6 +219,8 @@
       sendSettings()
     }
 
+    let latestJpg = null, latestMeta = null, rafId = null
+
     ws.onmessage = (event) => {
       if (typeof event.data === 'string') {
         try {
@@ -230,20 +232,28 @@
       }
       const buf = event.data
       const dv = new DataView(buf)
-      meta = {
+      latestMeta = {
         ox: dv.getInt32(0, true), oy: dv.getInt32(4, true),
         pw: dv.getInt32(8, true), ph: dv.getInt32(12, true),
         zoom: dv.getFloat64(16, true)
       }
-      // 动态更新分辨率选项
-      applyResolutions(meta.pw, meta.ph)
+      applyResolutions(latestMeta.pw, latestMeta.ph)
+      latestJpg = new Uint8Array(buf, 24)
 
-      const jpg = new Uint8Array(buf, 24)
-      const blob = new Blob([jpg], { type: 'image/jpeg' })
-      const url = URL.createObjectURL(blob)
-      const old = img.src
-      img.src = url
-      if (old && old.startsWith('blob:')) URL.revokeObjectURL(old)
+      // 只在没排期渲染时才请求新一帧（rAF 节流，展现最新帧）
+      if (rafId === null) {
+        rafId = requestAnimationFrame(() => {
+          rafId = null
+          if (!latestJpg) return
+          const blob = new Blob([latestJpg], { type: 'image/jpeg' })
+          const url = URL.createObjectURL(blob)
+          const old = img.src
+          img.src = url
+          if (old && old.startsWith('blob:')) URL.revokeObjectURL(old)
+          meta = latestMeta
+          latestJpg = null
+        })
+      }
     }
 
     ws.onclose = () => {
