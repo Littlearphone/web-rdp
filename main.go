@@ -130,7 +130,7 @@ func resolveDownloadURL() string {
 	if err != nil {
 		return ""
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var release struct {
 		Assets []struct {
 			Name               string `json:"name"`
@@ -155,7 +155,7 @@ func checkDXGI(path string) bool {
 
 func downloadAndExtract() {
 	tmpFile := filepath.Join(os.TempDir(), "ffmpeg_download.zip")
-	defer os.Remove(tmpFile)
+	defer func() { _ = os.Remove(tmpFile) }()
 
 	for attempt := 1; ; attempt++ {
 		// ── 解析下载地址 ──
@@ -186,7 +186,7 @@ func downloadAndExtract() {
 		for {
 			n, readErr := resp.Body.Read(buf)
 			if n > 0 {
-				f.Write(buf[:n])
+				_, _ = f.Write(buf[:n])
 				downloaded += int64(n)
 				// 每 200ms 刷新进度
 				if totalSize > 0 && time.Since(lastReport) > 200*time.Millisecond {
@@ -209,8 +209,8 @@ func downloadAndExtract() {
 				break
 			}
 		}
-		f.Close()
-		resp.Body.Close()
+		_ = f.Close()
+		_ = resp.Body.Close()
 
 		if totalSize > 0 && downloaded < totalSize {
 			fmt.Printf("\n  下载不完整 (%d/%d 字节)\n", downloaded, totalSize)
@@ -223,7 +223,7 @@ func downloadAndExtract() {
 
 		// ── 解压 ──
 		fmt.Println("解压...")
-		os.RemoveAll(ffmpegLocalDir)
+		_ = os.RemoveAll(ffmpegLocalDir)
 
 		zr, err := zip.OpenReader(tmpFile)
 		if err != nil {
@@ -242,10 +242,10 @@ func downloadAndExtract() {
 			}
 			target := filepath.Join(ffmpegLocalDir, parts[1])
 			if zf.FileInfo().IsDir() {
-				os.MkdirAll(target, 0755)
+				_ = os.MkdirAll(target, 0755)
 				continue
 			}
-			os.MkdirAll(filepath.Dir(target), 0755)
+			_ = os.MkdirAll(filepath.Dir(target), 0755)
 			rc, err := zf.Open()
 			if err != nil {
 				extractOK = false
@@ -253,19 +253,19 @@ func downloadAndExtract() {
 			}
 			out, err := os.Create(target)
 			if err != nil {
-				rc.Close()
+				_ = rc.Close()
 				extractOK = false
 				break
 			}
-			io.Copy(out, rc)
-			rc.Close()
-			out.Close()
+			_, _ = io.Copy(out, rc)
+			_ = rc.Close()
+			_ = out.Close()
 		}
-		zr.Close()
+		_ = zr.Close()
 
 		if !extractOK {
 			fmt.Println("  解压失败")
-			os.RemoveAll(ffmpegLocalDir)
+			_ = os.RemoveAll(ffmpegLocalDir)
 			if askYN("重试下载？") {
 				continue
 			}
@@ -365,8 +365,8 @@ type ffSession struct {
 func (f *ffSession) stop() {
 	if f.cmd != nil {
 		close(f.stopCh)
-		f.cmd.Process.Kill()
-		f.cmd.Wait()
+		_ = f.cmd.Process.Kill()
+		_ = f.cmd.Wait()
 	}
 }
 
@@ -513,7 +513,7 @@ func main() {
 	flag.StringVar(&listen, "listen", "", "监听地址 (默认所有地址，可指定 127.0.0.1)")
 	flag.Usage = func() {
 		out := flag.CommandLine.Output()
-		fmt.Fprintf(out, `Web 远程控制 v1.0 — 通过浏览器远程控制 Windows 桌面
+		_, _ = fmt.Fprintf(out, `Web 远程控制 v1.0 — 通过浏览器远程控制 Windows 桌面
 
 用法:
   %s [-listen <IP>] [-port <端口>] [-proxy <代理>]
@@ -561,7 +561,7 @@ func main() {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(indexHTML))
+		_, _ = w.Write([]byte(indexHTML))
 	})
 
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
@@ -569,7 +569,7 @@ func main() {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 
 		var currentID atomic.Int32
 		var currentQuality atomic.Int32
@@ -627,9 +627,9 @@ func main() {
 			for {
 				select {
 				case msg := <-sendCh:
-					conn.WriteMessage(websocket.BinaryMessage, msg)
+					_ = conn.WriteMessage(websocket.BinaryMessage, msg)
 				case s := <-statCh:
-					conn.WriteMessage(websocket.TextMessage, s)
+					_ = conn.WriteMessage(websocket.TextMessage, s)
 				}
 			}
 		}()
@@ -744,7 +744,7 @@ func main() {
 			img = downscale(img, mw)
 
 			goJpgBuf.Reset()
-			jpeg.Encode(&goJpgBuf, img, &jpeg.Options{Quality: q})
+			_ = jpeg.Encode(&goJpgBuf, img, &jpeg.Options{Quality: q})
 
 			msg := encodeFrame(
 				int32(cachedBounds.Min.X), int32(cachedBounds.Min.Y),
