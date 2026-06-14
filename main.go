@@ -144,11 +144,12 @@ func startFFmpeg(id, quality, maxW int) (*ffSession, int, int) {
 	if maxW > 0 && capW > maxW {
 		outH = capH * maxW / capW
 		outW = maxW
-		vf = fmt.Sprintf("scale=%d:%d", outW, outH)
+		vf = fmt.Sprintf("scale=%d:%d:flags=fast_bilinear", outW, outH)
 	}
 
 	args := []string{
 		"-hide_banner", "-loglevel", "error",
+		"-sws_flags", "fast_bilinear",
 		"-f", "gdigrab", "-framerate", "60",
 		"-offset_x", strconv.Itoa(capX),
 		"-offset_y", strconv.Itoa(capY),
