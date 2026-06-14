@@ -1,16 +1,26 @@
 package main
 
 import (
+	"archive/zip"
 	"bufio"
+	"bytes"
 	_ "embed"
 	"encoding/binary"
 	"encoding/json"
+	"flag"
 	"fmt"
+	"image"
+	"image/jpeg"
+	"io"
 	"log"
 	"math"
 	"net/http"
+	"net/url"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -18,10 +28,31 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/kbinani/screenshot"
+	"golang.org/x/image/draw"
 )
 
 //go:embed views/index.html
 var indexHTML string
+
+var httpClient *http.Client
+
+func initHTTPClient(proxy string) {
+	tr := &http.Transport{
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		ForceAttemptHTTP2:     true,
+	}
+	if proxy != "" {
+		proxyURL, err := url.Parse("http://" + proxy)
+		if err == nil {
+			tr.Proxy = http.ProxyURL(proxyURL)
+			fmt.Printf("使用代理: %s\n", proxy)
+		}
+	}
+	httpClient = &http.Client{Timeout: 5 * time.Minute, Transport: tr}
+}
+
+// ── Windows API ──
 
 var (
 	user32                  = syscall.NewLazyDLL("user32.dll")
@@ -33,7 +64,220 @@ var (
 
 type RECT struct{ Left, Top, Right, Bottom int32 }
 
-func init() { _, _, _ = procSetProcessDPIAware.Call() }
+// ── ffmpeg 发现 ──
+
+const ffmpegLocalDir = "ffmpeg_local"
+const ffmpegReleaseAPI = "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest"
+
+var (
+	ffmpegPath string // ffmpeg 可执行文件路径，空 = 不可用
+	hasDXGI    bool   // 是否支持 dxgigrab
+	useFFmpeg  bool   // 用户是否选择使用 ffmpeg
+)
+
+func detectFFmpeg() {
+	// 1. 优先检查本地目录
+	local := filepath.Join(ffmpegLocalDir, "bin", "ffmpeg.exe")
+	if _, err := os.Stat(local); err == nil {
+		ffmpegPath = local
+		hasDXGI = checkDXGI(local)
+		useFFmpeg = true
+		return
+	}
+
+	// 2. 检查系统 PATH
+	if p, err := exec.LookPath("ffmpeg"); err == nil {
+		ffmpegPath = p
+		hasDXGI = checkDXGI(p)
+		useFFmpeg = true
+
+		if !hasDXGI {
+			if askYN("当前 ffmpeg 不支持 dxgigrab，下载优化版？") {
+				downloadAndExtract()
+				if _, err := os.Stat(local); err == nil {
+					ffmpegPath = local
+					hasDXGI = checkDXGI(local)
+				}
+			}
+		}
+		return
+	}
+
+	// 3. 完全没找到 ffmpeg
+	if askYN("未找到 ffmpeg，自动下载？") {
+		downloadAndExtract()
+		if _, err := os.Stat(local); err == nil {
+			ffmpegPath = local
+			hasDXGI = checkDXGI(local)
+			useFFmpeg = true
+			return
+		}
+	}
+	useFFmpeg = false
+	fmt.Println("→ 使用纯 Go 截图方案（无 ffmpeg）")
+}
+
+func askYN(prompt string) bool {
+	fmt.Printf("\n⚠ %s [Y/n]: ", prompt)
+	reader := bufio.NewReader(os.Stdin)
+	line, _ := reader.ReadString('\n')
+	line = strings.TrimSpace(strings.ToLower(line))
+	return line == "" || line == "y" || line == "yes"
+}
+
+func resolveDownloadURL() string {
+	resp, err := httpClient.Get(ffmpegReleaseAPI)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	var release struct {
+		Assets []struct {
+			Name               string `json:"name"`
+			BrowserDownloadURL string `json:"browser_download_url"`
+		} `json:"assets"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&release) != nil {
+		return ""
+	}
+	for _, a := range release.Assets {
+		if strings.Contains(a.Name, "win64") && strings.Contains(a.Name, "gpl") && strings.HasSuffix(a.Name, ".zip") {
+			return a.BrowserDownloadURL
+		}
+	}
+	return ""
+}
+
+func checkDXGI(path string) bool {
+	out, err := exec.Command(path, "-hide_banner", "-devices").Output()
+	return err == nil && strings.Contains(string(out), "dxgigrab")
+}
+
+func downloadAndExtract() {
+	tmpFile := filepath.Join(os.TempDir(), "ffmpeg_download.zip")
+	defer os.Remove(tmpFile)
+
+	for attempt := 1; ; attempt++ {
+		// ── 解析下载地址 ──
+		dlURL := resolveDownloadURL()
+		if dlURL == "" {
+			fmt.Println("  无法获取下载地址，请检查网络或手动安装 ffmpeg")
+			return
+		}
+
+		// ── 下载 ──
+		fmt.Printf("下载 ffmpeg... (约 120MB)\n")
+		resp, err := httpClient.Get(dlURL)
+		if err != nil {
+			fmt.Printf("  下载失败: %v\n", err)
+			if askYN("重试下载？") {
+				continue
+			}
+			return
+		}
+
+		f, _ := os.Create(tmpFile)
+		totalSize := resp.ContentLength
+		downloaded := int64(0)
+		startTime := time.Now()
+		buf := make([]byte, 64*1024)
+		lastReport := time.Now()
+
+		for {
+			n, readErr := resp.Body.Read(buf)
+			if n > 0 {
+				f.Write(buf[:n])
+				downloaded += int64(n)
+				// 每 200ms 刷新进度
+				if totalSize > 0 && time.Since(lastReport) > 200*time.Millisecond {
+					elapsed := time.Since(startTime).Seconds()
+					speed := float64(downloaded) / elapsed / 1024 / 1024 // MB/s
+					pct := downloaded * 100 / totalSize
+					eta := ""
+					if speed > 0 {
+						remaining := float64(totalSize-downloaded) / (speed * 1024 * 1024)
+						eta = fmt.Sprintf(" 剩余 %ds", int(remaining))
+					}
+					fmt.Printf("\r  %d%%  %.1f MB/s%s    ", pct, speed, eta)
+					lastReport = time.Now()
+				} else if totalSize <= 0 {
+					mb := float64(downloaded) / 1024 / 1024
+					fmt.Printf("\r  已下载 %.1f MB    ", mb)
+				}
+			}
+			if readErr != nil {
+				break
+			}
+		}
+		f.Close()
+		resp.Body.Close()
+
+		if totalSize > 0 && downloaded < totalSize {
+			fmt.Printf("\n  下载不完整 (%d/%d 字节)\n", downloaded, totalSize)
+			if askYN("重试下载？") {
+				continue
+			}
+			return
+		}
+		fmt.Printf("\n  下载完成 (%.1f MB)\n", float64(downloaded)/1024/1024)
+
+		// ── 解压 ──
+		fmt.Println("解压...")
+		os.RemoveAll(ffmpegLocalDir)
+
+		zr, err := zip.OpenReader(tmpFile)
+		if err != nil {
+			fmt.Printf("  解压失败: %v\n", err)
+			if askYN("重试下载？") {
+				continue
+			}
+			return
+		}
+
+		extractOK := true
+		for _, zf := range zr.File {
+			parts := strings.SplitN(zf.Name, "/", 2)
+			if len(parts) < 2 || parts[1] == "" {
+				continue
+			}
+			target := filepath.Join(ffmpegLocalDir, parts[1])
+			if zf.FileInfo().IsDir() {
+				os.MkdirAll(target, 0755)
+				continue
+			}
+			os.MkdirAll(filepath.Dir(target), 0755)
+			rc, err := zf.Open()
+			if err != nil {
+				extractOK = false
+				break
+			}
+			out, err := os.Create(target)
+			if err != nil {
+				rc.Close()
+				extractOK = false
+				break
+			}
+			io.Copy(out, rc)
+			rc.Close()
+			out.Close()
+		}
+		zr.Close()
+
+		if !extractOK {
+			fmt.Println("  解压失败")
+			os.RemoveAll(ffmpegLocalDir)
+			if askYN("重试下载？") {
+				continue
+			}
+			return
+		}
+
+		fmt.Printf("→ ffmpeg 就绪 (ffmpeg_local/)  重试 %d 次\n", attempt-1)
+		return
+	}
+}
+
+// ── 缩放比缓存 ──
 
 var (
 	zoomCache   = make(map[int]float64)
@@ -79,6 +323,17 @@ func encodeFrame(ox, oy, pw, ph int32, zoom float64, jpg []byte) []byte {
 	return buf
 }
 
+func downscale(img *image.RGBA, maxW int) *image.RGBA {
+	if maxW <= 0 || img.Bounds().Dx() <= maxW {
+		return img
+	}
+	newW := maxW
+	newH := img.Bounds().Dy() * maxW / img.Bounds().Dx()
+	dst := image.NewRGBA(image.Rect(0, 0, newW, newH))
+	draw.BiLinear.Scale(dst, dst.Bounds(), img, img.Bounds(), draw.Over, nil)
+	return dst
+}
+
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
@@ -98,37 +353,46 @@ type statsMsg struct {
 	H     int     `json:"h"`
 }
 
-// ── ffmpeg gdigrab 单屏捕获 ──
+// ── ffmpeg 管线 ──
 
 type ffSession struct {
-	cmd    *exec.Cmd
-	stdout *bufio.Reader
-	mu     sync.Mutex
+	cmd     *exec.Cmd
+	stdout  *bufio.Reader
+	frameCh chan []byte
+	stopCh  chan struct{}
 }
 
 func (f *ffSession) stop() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	if f.cmd != nil {
+		close(f.stopCh)
 		f.cmd.Process.Kill()
 		f.cmd.Wait()
-		f.cmd = nil
-		f.stdout = nil
 	}
 }
 
 func startFFmpeg(id, quality, maxW int) (*ffSession, int, int) {
 	bounds := screenshot.GetDisplayBounds(id)
-	primaryZoom := getScreenZoom(0) // 虚拟桌面坐标系始终按主屏 DPI 缩放
-
 	physW := bounds.Dx()
 	physH := bounds.Dy()
-	capW := int(float64(physW) * primaryZoom)
-	capH := int(float64(physH) * primaryZoom)
-	capX := int(float64(bounds.Min.X) * primaryZoom)
-	capY := int(float64(bounds.Min.Y) * primaryZoom)
 
-	// 输出尺寸（初始 = 截图区域，可能被缩放缩小）
+	var capX, capY, capW, capH int
+	var device string
+
+	if hasDXGI {
+		device = "dxgigrab"
+		capX = bounds.Min.X
+		capY = bounds.Min.Y
+		capW = physW
+		capH = physH
+	} else {
+		z := getScreenZoom(0)
+		device = "gdigrab"
+		capX = int(float64(bounds.Min.X) * z)
+		capY = int(float64(bounds.Min.Y) * z)
+		capW = int(float64(physW) * z)
+		capH = int(float64(physH) * z)
+	}
+
 	outW := capW
 	outH := capH
 
@@ -150,7 +414,7 @@ func startFFmpeg(id, quality, maxW int) (*ffSession, int, int) {
 	args := []string{
 		"-hide_banner", "-loglevel", "error",
 		"-sws_flags", "fast_bilinear",
-		"-f", "gdigrab", "-framerate", "60",
+		"-f", device, "-framerate", "60", // 最大 60fps，超过会导致 CPU 100% 卡死
 		"-offset_x", strconv.Itoa(capX),
 		"-offset_y", strconv.Itoa(capY),
 		"-video_size", fmt.Sprintf("%dx%d", capW, capH),
@@ -160,7 +424,7 @@ func startFFmpeg(id, quality, maxW int) (*ffSession, int, int) {
 		"-f", "image2pipe", "pipe:1",
 	}
 
-	cmd := exec.Command("ffmpeg", args...)
+	cmd := exec.Command(ffmpegPath, args...)
 	cmd.Stderr = log.Writer()
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -171,14 +435,42 @@ func startFFmpeg(id, quality, maxW int) (*ffSession, int, int) {
 		return nil, 0, 0
 	}
 
-	log.Printf("ffmpeg: screen=%d phys=%dx%d@(%d,%d) zoom=%.2f cap=%dx%d@(%d,%d) out=%dx%d",
-		id, physW, physH, bounds.Min.X, bounds.Min.Y,
-		primaryZoom, capW, capH, capX, capY, outW, outH)
+	log.Printf("ffmpeg: %s screen=%d phys=%dx%d@(%d,%d) cap=%dx%d@(%d,%d) out=%dx%d",
+		device, id, physW, physH, bounds.Min.X, bounds.Min.Y,
+		capW, capH, capX, capY, outW, outH)
 
-	return &ffSession{
-		cmd:    cmd,
-		stdout: bufio.NewReaderSize(stdout, 256*1024),
-	}, outW, outH
+	ff := &ffSession{
+		cmd:     cmd,
+		stdout:  bufio.NewReaderSize(stdout, 256*1024),
+		frameCh: make(chan []byte, 1),
+		stopCh:  make(chan struct{}),
+	}
+
+	go func() {
+		buf := make([]byte, 0, 512*1024)
+		for {
+			select {
+			case <-ff.stopCh:
+				return
+			default:
+			}
+			jpg, err := readJPEG(ff.stdout, buf)
+			if err != nil {
+				return
+			}
+			buf = jpg
+			frame := make([]byte, len(jpg))
+			copy(frame, jpg)
+			select {
+			case ff.frameCh <- frame:
+			default:
+				<-ff.frameCh
+				ff.frameCh <- frame
+			}
+		}
+	}()
+
+	return ff, outW, outH
 }
 
 func readJPEG(br *bufio.Reader, buf []byte) ([]byte, error) {
@@ -211,6 +503,14 @@ func readJPEG(br *bufio.Reader, buf []byte) ([]byte, error) {
 }
 
 func main() {
+	var proxy string
+	flag.StringVar(&proxy, "proxy", "", "HTTP 代理地址，如 localhost:7890")
+	flag.Parse()
+
+	_, _, _ = procSetProcessDPIAware.Call()
+	initHTTPClient(proxy)
+	detectFFmpeg()
+
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -261,15 +561,34 @@ func main() {
 		}()
 
 		var (
-			ff        *ffSession
-			ffScreen  = -1
-			ffQ       = -1
-			ffMW      = -1
-			jpgBuf    = make([]byte, 0, 512*1024)
-			frames    int
-			totalEnc  time.Duration
-			lastStats time.Time
+			ff           *ffSession
+			ffScreen     = -1
+			ffQ          = -1
+			ffMW         = -1
+			goJpgBuf     bytes.Buffer
+			frames       int
+			totalWait    time.Duration
+			lastStats    time.Time
+			lastFrame    time.Time
+			maxWait      time.Duration
+			cachedBounds image.Rectangle
+			cachedZoom   float64
+			cacheFrame   int
+			sendCh       = make(chan []byte, 3) // 帧
+			statCh       = make(chan []byte, 1) // stats
 		)
+
+		// 唯一写 goroutine：一个协程写 WebSocket，无需锁
+		go func() {
+			for {
+				select {
+				case msg := <-sendCh:
+					conn.WriteMessage(websocket.BinaryMessage, msg)
+				case s := <-statCh:
+					conn.WriteMessage(websocket.TextMessage, s)
+				}
+			}
+		}()
 
 		for {
 			id := int(currentID.Load())
@@ -281,68 +600,148 @@ func main() {
 			q := int(currentQuality.Load())
 			mw := int(currentMaxW.Load())
 
-			// 参数变了 → 重启 ffmpeg
-			if ff == nil || ffScreen != id || ffQ != q || ffMW != mw {
-				if ff != nil {
-					ff.stop()
+			// ffmpeg 路径
+			if useFFmpeg {
+				if ff == nil || ffScreen != id || ffQ != q || ffMW != mw {
+					if ff != nil {
+						ff.stop()
+					}
+					var outW, outH int
+					ff, outW, outH = startFFmpeg(id, q, mw)
+					if ff == nil {
+						log.Printf("ffmpeg 启动失败")
+						time.Sleep(time.Second)
+						continue
+					}
+					ffScreen = id
+					ffQ = q
+					ffMW = mw
+					_ = outW
+					_ = outH
 				}
-				var outW, outH int
-				ff, outW, outH = startFFmpeg(id, q, mw)
-				if ff == nil {
-					log.Printf("ffmpeg 启动失败，1秒后重试")
-					time.Sleep(time.Second)
+
+				var jpg []byte
+				select {
+				case jpg = <-ff.frameCh:
+				case <-time.After(5 * time.Second):
+					log.Printf("ffmpeg 5 秒无帧，重启")
+					ff.stop()
+					ff = nil
+					ffScreen = -1
 					continue
 				}
-				ffScreen = id
-				ffQ = q
-				ffMW = mw
-				_ = outW
-				_ = outH
-			}
 
-			// 从 ffmpeg stdout 读一帧 JPEG
-			t0 := time.Now()
-			jpg, err := readJPEG(ff.stdout, jpgBuf)
-			if err != nil {
-				log.Printf("ffmpeg 读取失败: %v", err)
-				ff.stop()
-				ff = nil
-				ffScreen = -1
+				now := time.Now()
+				if !lastFrame.IsZero() {
+					wait := now.Sub(lastFrame)
+					totalWait += wait
+					if wait > maxWait {
+						maxWait = wait
+					}
+				}
+				lastFrame = now
+
+				// 缓存 bounds/zoom，每 30 帧刷新一次（避免 Win32 API 偶尔卡）
+				if cacheFrame <= 0 || ffScreen != id {
+					cachedBounds = screenshot.GetDisplayBounds(id)
+					cachedZoom = getScreenZoom(id)
+					cacheFrame = 30
+				}
+				cacheFrame--
+
+				msg := encodeFrame(
+					int32(cachedBounds.Min.X), int32(cachedBounds.Min.Y),
+					int32(cachedBounds.Dx()), int32(cachedBounds.Dy()),
+					cachedZoom, jpg,
+				)
+
+				select {
+				case sendCh <- msg:
+				default:
+				}
+
+				frames++
+				elapsed := time.Since(lastStats)
+				if elapsed >= time.Second {
+					fps := float64(frames) / elapsed.Seconds()
+					maxW := float64(maxWait.Microseconds()) / 1000
+					stat := statsMsg{
+						FPS:   math.Round(fps*10) / 10,
+						EncMs: math.Round(maxW*10) / 10,
+						KB:    math.Round(float64(len(msg))/102.4) / 10,
+						Q:     q, W: cachedBounds.Dx(), H: cachedBounds.Dy(),
+					}
+					if b, _ := json.Marshal(stat); b != nil {
+						select {
+						case statCh <- b:
+						default:
+						}
+					}
+					frames = 0
+					totalWait = 0
+					maxWait = 0
+					lastStats = time.Now()
+				}
 				continue
 			}
-			jpgBuf = jpg
-			totalEnc += time.Since(t0)
 
-			// 取元数据（用于前端点击坐标）
-			bounds := screenshot.GetDisplayBounds(id)
-			zoom := getScreenZoom(id)
+			// ── 纯 Go 回退路径 ──
+			img, err := screenshot.CaptureDisplay(id)
+			if err != nil {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			if cacheFrame <= 0 {
+				cachedBounds = screenshot.GetDisplayBounds(id)
+				cachedZoom = getScreenZoom(id)
+				cacheFrame = 30
+			}
+			cacheFrame--
+			img = downscale(img, mw)
+
+			goJpgBuf.Reset()
+			jpeg.Encode(&goJpgBuf, img, &jpeg.Options{Quality: q})
 
 			msg := encodeFrame(
-				int32(bounds.Min.X), int32(bounds.Min.Y),
-				int32(bounds.Dx()), int32(bounds.Dy()),
-				zoom, jpg,
+				int32(cachedBounds.Min.X), int32(cachedBounds.Min.Y),
+				int32(cachedBounds.Dx()), int32(cachedBounds.Dy()),
+				cachedZoom, goJpgBuf.Bytes(),
 			)
-			if err := conn.WriteMessage(websocket.BinaryMessage, msg); err != nil {
-				ff.stop()
-				return
+			select {
+			case sendCh <- msg:
+			default:
 			}
+
+			now := time.Now()
+			if !lastFrame.IsZero() {
+				wait := now.Sub(lastFrame)
+				totalWait += wait
+				if wait > maxWait {
+					maxWait = wait
+				}
+			}
+			lastFrame = now
 
 			frames++
 			elapsed := time.Since(lastStats)
 			if elapsed >= time.Second {
 				fps := float64(frames) / elapsed.Seconds()
-				avgMs := float64(totalEnc.Microseconds()) / float64(frames) / 1000
+				maxW := float64(maxWait.Microseconds()) / 1000
 				stat := statsMsg{
 					FPS:   math.Round(fps*10) / 10,
-					EncMs: math.Round(avgMs*10) / 10,
+					EncMs: math.Round(maxW*10) / 10,
 					KB:    math.Round(float64(len(msg))/102.4) / 10,
-					Q:     q, W: bounds.Dx(), H: bounds.Dy(),
+					Q:     q, W: cachedBounds.Dx(), H: cachedBounds.Dy(),
 				}
 				if b, _ := json.Marshal(stat); b != nil {
-					conn.WriteMessage(websocket.TextMessage, b)
+					select {
+					case statCh <- b:
+					default:
+					}
 				}
 				frames = 0
-				totalEnc = 0
+				totalWait = 0
+				maxWait = 0
 				lastStats = time.Now()
 			}
 		}
