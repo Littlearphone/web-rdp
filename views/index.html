@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Web远程控制</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    width: 100vw; height: 100vh; background: #000; color: #ddd;
+    display: flex; flex-direction: column; overflow: hidden; font-family: sans-serif;
+  }
+  #bar {
+    min-height: 36px; background: #1a1a1a; display: flex; align-items: center;
+    flex-wrap: wrap; padding: 4px 10px; border-bottom: 1px solid #333;
+    font-size: 12px; gap: 8px; user-select: none;
+  }
+  #view {
+    flex: 1; display: flex; align-items: center; justify-content: center; overflow: hidden;
+  }
+  #screen {
+    max-width: 100%; max-height: 100%; object-fit: contain; cursor: crosshair;
+  }
+  select, input[type=range], input[type=text], input[type=number] {
+    background: #333; color: #fff; border: 1px solid #555; border-radius: 3px; padding: 2px 4px;
+  }
+  input[type=range] { width: 80px; accent-color: #f1c40f; padding: 0; }
+  input[type=checkbox] { accent-color: #f1c40f; }
+  label { cursor: pointer; }
+  .sep { color: #444; }
+  #stats { font-size: 11px; color: #4ec9b0; min-width: 200px; text-align: right; }
+  #status-text { font-size: 11px; margin-left: 6px; cursor: pointer; white-space: nowrap; }
+
+  /* 连接弹窗 */
+  #conn-overlay {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.85); z-index: 999;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #conn-dialog {
+    background: #1e1e1e; border: 1px solid #444; border-radius: 8px;
+    padding: 28px 32px; text-align: center; min-width: 320px;
+  }
+  #conn-dialog h3 { margin-bottom: 20px; font-weight: 400; }
+  #conn-dialog .row {
+    display: flex; align-items: center; justify-content: center; gap: 6px; margin-bottom: 14px;
+  }
+  #conn-dialog .row label { min-width: 30px; color: #999; font-size: 13px; }
+  #conn-dialog input[type=text], #conn-dialog input[type=number] {
+    font-size: 14px; padding: 6px 10px; width: 140px;
+  }
+  #conn-dialog button {
+    margin-top: 10px; padding: 8px 40px; font-size: 14px;
+    background: #f1c40f; color: #000; border: none; border-radius: 4px; cursor: pointer; font-weight: 600;
+  }
+  #conn-dialog button:hover { background: #f39c12; }
+  #conn-msg { color: #e74c3c; font-size: 12px; margin-top: 8px; min-height: 18px; }
+
+  /* 重连提示 */
+  #reconnect-hint {
+    display: none; position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: #1a1a1a; border: 1px solid #f1c40f; border-radius: 6px;
+    padding: 10px 20px; color: #f1c40f; font-size: 13px; z-index: 100;
+    white-space: nowrap; gap: 12px; align-items: center;
+  }
+  #reconnect-hint button {
+    background: #f1c40f; color: #000; border: none; border-radius: 3px;
+    padding: 4px 14px; cursor: pointer; font-weight: 600; font-size: 12px;
+  }
+</style>
+</head>
+<body>
+
+<div id="conn-overlay">
+  <div id="conn-dialog">
+    <h3>连接到远程桌面</h3>
+    <div class="row">
+      <label>IP</label>
+      <input type="text" id="conn-ip" value="localhost" placeholder="IP">
+      <label>:</label>
+      <input type="number" id="conn-port" value="9000" placeholder="端口" min="1" max="65535">
+    </div>
+    <div style="display:flex;gap:10px;justify-content:center;">
+      <button onclick="doConnect()">连 接</button>
+      <button onclick="document.getElementById('conn-overlay').style.display='none'" style="background:#444;color:#ddd;font-weight:400;">取消</button>
+    </div>
+    <div id="conn-msg"></div>
+  </div>
+</div>
+
+<div id="bar">
+  <span>屏幕</span>
+  <select id="screen-id">
+    <option value="0">主屏(0)</option>
+    <option value="1">副屏(1)</option>
+  </select>
+  <span class="sep">|</span>
+  <span>画质</span>
+  <input type="range" id="quality" min="30" max="100" value="75" step="5">
+  <span id="quality-val" style="min-width:26px;">75</span>
+  <span class="sep">|</span>
+  <span>分辨率</span>
+  <select id="maxw"><option value="0">原始</option></select>
+  <span class="sep">|</span>
+  <input type="checkbox" id="enable-control">
+  <label for="enable-control">控制</label>
+  <span class="sep">|</span>
+  <span id="stats">等待数据...</span>
+  <span style="margin-left:auto;display:flex;align-items:center;gap:10px;">
+    <span id="change-server" style="cursor:pointer;font-size:11px;color:#bbb;border:1px solid #555;border-radius:3px;padding:2px 8px;user-select:none;" title="更换连接地址">⚙ 切换</span>
+    <span id="status-text" style="color:#e74c3c;">未连接</span>
+  </span>
+</div>
+<div id="view">
+  <img id="screen" src="" alt="等待画面信号...">
+</div>
+
+<div id="reconnect-hint">
+  <span id="reconnect-msg"></span>
+  <button onclick="manualReconnect()">立即重连</button>
+</div>
+
+<script>
+  const overlay = document.getElementById('conn-overlay')
+  const connIp = document.getElementById('conn-ip')
+  const connPort = document.getElementById('conn-port')
+  const connMsg = document.getElementById('conn-msg')
+  const img = document.getElementById('screen')
+  const select = document.getElementById('screen-id')
+  const statusEl = document.getElementById('status-text')
+  const controlCheck = document.getElementById('enable-control')
+  const qualitySlider = document.getElementById('quality')
+  const qualityVal = document.getElementById('quality-val')
+  const maxwSelect = document.getElementById('maxw')
+  const statsEl = document.getElementById('stats')
+  const reconnectHint = document.getElementById('reconnect-hint')
+  const reconnectMsg = document.getElementById('reconnect-msg')
+  const changeServerLink = document.getElementById('change-server')
+
+  let meta = { ox: 0, oy: 0, pw: 1, ph: 1, zoom: 1.0 }
+  let serverAddr = ''
+  let ws = null
+  let reconnectTimer = null
+  let reconnectDelay = 5
+  let reconnectCountdown = 0
+  let wasConnected = false
+  let lastResKey = ''
+
+  // ── 分辨率选项动态生成（最小 480p）──
+  function buildResolutions(pw, ph) {
+    const opts = [{ label: `原始 (${pw}×${ph})`, value: 0 }]
+    // 按高度定档：1080p / 720p / 480p
+    for (const targetH of [1080, 720, 480]) {
+      if (targetH >= ph) continue
+      const w = Math.round(pw * targetH / ph)
+      opts.push({ label: `${w}×${targetH}`, value: w })
+    }
+    return opts
+  }
+
+  function applyResolutions(pw, ph) {
+    const key = `${pw}x${ph}`
+    if (key === lastResKey) return
+    lastResKey = key
+    const opts = buildResolutions(pw, ph)
+    const cur = maxwSelect.value
+    maxwSelect.innerHTML = ''
+    opts.forEach(o => {
+      const el = document.createElement('option')
+      el.value = o.value; el.textContent = o.label
+      maxwSelect.appendChild(el)
+    })
+    // 尝试保持当前选择
+    if (opts.find(o => String(o.value) === cur)) maxwSelect.value = cur
+  }
+
+  // ── 连接 ──
+  function doConnect() {
+    const ip = connIp.value.trim() || 'localhost'
+    const port = parseInt(connPort.value) || 9000
+    const addr = `${ip}:${port}`
+
+    // 相同地址且已连接 → 直接关闭弹窗
+    if (addr === serverAddr && ws && ws.readyState === WebSocket.OPEN) {
+      overlay.style.display = 'none'
+      return
+    }
+
+    // 不同地址 → 断开旧连接
+    serverAddr = addr
+    connMsg.textContent = ''
+    wasConnected = false
+    if (ws) { ws.onclose = null; ws.close(); ws = null }
+    connect()
+  }
+
+  connIp.addEventListener('keydown', e => { if (e.key === 'Enter') doConnect() })
+  connPort.addEventListener('keydown', e => { if (e.key === 'Enter') doConnect() })
+
+  function connect() {
+    if (ws) { ws.onclose = null; ws.close(); ws = null }
+    clearReconnectTimer()
+    reconnectHint.style.display = 'none'
+
+    statusEl.textContent = '连接中...'
+    statusEl.style.color = '#f1c40f'
+    statsEl.innerHTML = '等待数据...'
+    lastResKey = ''
+
+    const url = `ws://${serverAddr}/ws`
+    ws = new WebSocket(url)
+    ws.binaryType = 'arraybuffer'
+
+    ws.onopen = () => {
+      wasConnected = true
+      overlay.style.display = 'none'
+      statusEl.textContent = '已连接'
+      statusEl.style.color = '#27ae60'
+      reconnectDelay = 5
+      sendSettings()
+    }
+
+    ws.onmessage = (event) => {
+      if (typeof event.data === 'string') {
+        try {
+          const s = JSON.parse(event.data)
+          statsEl.innerHTML =
+            `${s.w}×${s.h} Q${s.q} │ ${s.fps} fps │ 帧 ${s.enc_ms}ms │ ${s.kb}KB`
+        } catch (_) {}
+        return
+      }
+      const buf = event.data
+      const dv = new DataView(buf)
+      meta = {
+        ox: dv.getInt32(0, true), oy: dv.getInt32(4, true),
+        pw: dv.getInt32(8, true), ph: dv.getInt32(12, true),
+        zoom: dv.getFloat64(16, true)
+      }
+      // 动态更新分辨率选项
+      applyResolutions(meta.pw, meta.ph)
+
+      const jpg = new Uint8Array(buf, 24)
+      const blob = new Blob([jpg], { type: 'image/jpeg' })
+      const url = URL.createObjectURL(blob)
+      const old = img.src
+      img.src = url
+      if (old && old.startsWith('blob:')) URL.revokeObjectURL(old)
+    }
+
+    ws.onclose = () => {
+      statusEl.textContent = '连接断开'
+      statusEl.style.color = '#e74c3c'
+      statsEl.innerHTML = '离线'
+      if (wasConnected) startReconnect()
+    }
+
+    ws.onerror = () => {
+      if (!wasConnected) {
+        connMsg.textContent = '连接失败，请检查 IP 和端口'
+        statusEl.textContent = '未连接'
+        statusEl.style.color = '#e74c3c'
+      }
+    }
+  }
+
+  // ── 自动重连（5s 起，逐次加倍，最长 30s）──
+  function startReconnect() {
+    scheduleReconnect()
+  }
+
+  function scheduleReconnect() {
+    clearReconnectTimer()
+    reconnectCountdown = reconnectDelay
+    updateReconnectUI()
+    reconnectHint.style.display = 'flex'
+
+    reconnectTimer = setInterval(() => {
+      reconnectCountdown--
+      if (reconnectCountdown <= 0) {
+        clearReconnectTimer()
+        reconnectHint.style.display = 'none'
+        reconnectDelay = Math.min(reconnectDelay * 2, 30)
+        connect()
+        return
+      }
+      updateReconnectUI()
+    }, 1000)
+  }
+
+  function updateReconnectUI() {
+    reconnectMsg.textContent = `${reconnectCountdown} 秒后自动重连...`
+  }
+
+  function manualReconnect() {
+    clearReconnectTimer()
+    reconnectHint.style.display = 'none'
+    connect()
+  }
+
+  function clearReconnectTimer() {
+    if (reconnectTimer) { clearInterval(reconnectTimer); reconnectTimer = null }
+  }
+
+  // 切换服务器 → 弹窗（不断开当前连接）
+  changeServerLink.onclick = () => {
+    clearReconnectTimer()
+    reconnectHint.style.display = 'none'
+    if (serverAddr) {
+      const parts = serverAddr.split(':')
+      connIp.value = parts[0] || 'localhost'
+      connPort.value = parts[1] || '9000'
+    }
+    overlay.style.display = 'flex'
+    connMsg.textContent = ''
+    connIp.focus()
+  }
+
+  // 状态栏点击重连
+  statusEl.onclick = () => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      clearReconnectTimer()
+      reconnectHint.style.display = 'none'
+      connect()
+    }
+  }
+
+  // ── 控制消息 ──
+  function sendSettings() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    ws.send(JSON.stringify({
+      quality: parseInt(qualitySlider.value),
+      maxw: parseInt(maxwSelect.value)
+    }))
+  }
+
+  select.onchange = () => {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(select.value)
+    lastResKey = '' // 切屏后重建分辨率列表
+  }
+  qualitySlider.oninput = () => { qualityVal.textContent = qualitySlider.value }
+  qualitySlider.onchange = () => { qualityVal.textContent = qualitySlider.value; sendSettings() }
+  maxwSelect.onchange = () => sendSettings()
+
+  // ── 远程点击 ──
+  let active = false
+  img.onmousedown = (e) => {
+    active = controlCheck.checked
+    if (!active) return
+    e.preventDefault()
+  }
+  img.onmouseup = (e) => {
+    if (!active) return
+    active = false
+    e.preventDefault()
+    const rect = img.getBoundingClientRect()
+    const ratio = meta.pw / meta.ph
+    const cRatio = rect.width / rect.height
+    let aw, ah, ox = 0, oy = 0
+    if (ratio > cRatio) {
+      aw = rect.width; ah = rect.width / ratio; oy = (rect.height - ah) / 2
+    } else {
+      ah = rect.height; aw = rect.height * ratio; ox = (rect.width - aw) / 2
+    }
+    const cx = (e.clientX - rect.left - ox) / aw
+    const cy = (e.clientY - rect.top - oy) / ah
+    if (cx < 0 || cx > 1 || cy < 0 || cy > 1) return
+    const fx = Math.round((meta.ox * meta.zoom) + (cx * meta.pw * meta.zoom))
+    const fy = Math.round((meta.oy * meta.zoom) + (cy * meta.ph * meta.zoom))
+    fetch(`http://${serverAddr}/click?x=${fx}&y=${fy}`)
+      .then(r => r.text()).then(d => console.log('点击:', d))
+      .catch(e => console.error('点击失败:', e))
+  }
+
+  connIp.focus()
+</script>
+</body>
+</html>
