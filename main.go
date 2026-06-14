@@ -503,8 +503,52 @@ func readJPEG(br *bufio.Reader, buf []byte) ([]byte, error) {
 }
 
 func main() {
-	var proxy string
-	flag.StringVar(&proxy, "proxy", "", "HTTP 代理地址，如 localhost:7890")
+	var (
+		proxy  string
+		port   int
+		listen string
+	)
+	flag.StringVar(&proxy, "proxy", "", "HTTP 代理地址 (用于下载 ffmpeg)")
+	flag.IntVar(&port, "port", 9000, "监听端口")
+	flag.StringVar(&listen, "listen", "", "监听地址 (默认所有地址，可指定 127.0.0.1)")
+	flag.Usage = func() {
+		out := flag.CommandLine.Output()
+		fmt.Fprintf(out, `Web 远程控制 v1.0 — 通过浏览器远程控制 Windows 桌面
+
+用法:
+  %s [-listen <IP>] [-port <端口>] [-proxy <代理>]
+
+参数说明:
+  -listen string
+        监听的 IP 地址
+        · 不填（默认）：监听所有网络接口（局域网可访问）
+        · 0.0.0.0      ：显式监听所有接口（同上）
+        · 127.0.0.1    ：仅本机可访问
+        · 192.168.1.x  ：仅监听指定网卡
+
+  -port int
+        监听的端口号 (默认: 9000)
+        · 1-1023 需要管理员权限
+        · 建议使用 1024-65535 之间的端口
+
+  -proxy string
+        HTTP 代理地址，用于下载 ffmpeg
+        · 格式: IP:端口 或 :端口（默认 localhost）
+        · 示例: -proxy 127.0.0.1:7890  或  -proxy :7890
+
+示例:
+  %-40s  默认配置
+  %-40s  指定端口
+  %-40s  仅本机访问
+  %-40s  局域网分享
+  %-40s  走代理下载 ffmpeg
+`, os.Args[0],
+			"web-rdp.exe",
+			"web-rdp.exe -port 8080",
+			"web-rdp.exe -listen 127.0.0.1",
+			"web-rdp.exe -listen 0.0.0.0 -port 9000",
+			"web-rdp.exe -proxy :7890")
+	}
 	flag.Parse()
 
 	_, _, _ = procSetProcessDPIAware.Call()
@@ -763,6 +807,7 @@ func main() {
 		_, _, _ = procMouseWait.Call(uintptr(0x0004), uintptr(ix), uintptr(iy), 0, 0)
 	})
 
-	fmt.Println("远控已启动 → http://localhost:9000")
-	log.Fatal(http.ListenAndServe(":9000", nil))
+	addr := fmt.Sprintf("%s:%d", listen, port)
+	fmt.Printf("远控已启动 → http://%s\n", addr)
+	log.Fatal(http.ListenAndServe(addr, nil))
 }
