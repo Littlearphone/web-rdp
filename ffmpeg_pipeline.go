@@ -1,0 +1,161 @@
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"log"
+	"os/exec"
+	"strconv"
+
+	"github.com/kbinani/screenshot"
+)
+
+// ── ffmpeg 管线 ──
+
+type ffSession struct {
+	cmd     *exec.Cmd
+	stdout  *bufio.Reader
+	frameCh chan []byte
+	stopCh  chan struct{}
+}
+
+func (f *ffSession) stop() {
+	if f.cmd != nil {
+		close(f.stopCh)
+		_ = f.cmd.Process.Kill()
+		_ = f.cmd.Wait()
+	}
+}
+
+func startFFmpeg(id, quality, maxW int) (*ffSession, int, int) {
+	bounds := screenshot.GetDisplayBounds(id)
+	physW := bounds.Dx()
+	physH := bounds.Dy()
+
+	var capX, capY, capW, capH int
+	var device string
+
+	if hasDXGI {
+		device = "dxgigrab"
+		capX = bounds.Min.X
+		capY = bounds.Min.Y
+		capW = physW
+		capH = physH
+	} else {
+		z := getScreenZoom(0)
+		device = "gdigrab"
+		capX = int(float64(bounds.Min.X) * z)
+		capY = int(float64(bounds.Min.Y) * z)
+		capW = int(float64(physW) * z)
+		capH = int(float64(physH) * z)
+	}
+
+	outW := capW
+	outH := capH
+
+	ffQ := 32 - (quality-1)*31/99
+	if ffQ < 1 {
+		ffQ = 1
+	}
+	if ffQ > 31 {
+		ffQ = 31
+	}
+
+	vf := "null"
+	if maxW > 0 && capW > maxW {
+		outH = capH * maxW / capW
+		outW = maxW
+		vf = fmt.Sprintf("scale=%d:%d:flags=fast_bilinear", outW, outH)
+	}
+
+	args := []string{
+		"-hide_banner", "-loglevel", "error",
+		"-sws_flags", "fast_bilinear",
+		"-f", device, "-framerate", "60", // 最大 60fps，超过会导致 CPU 100% 卡死
+		"-draw_mouse", "0", // 不捕获光标，消除闪烁
+		"-offset_x", strconv.Itoa(capX),
+		"-offset_y", strconv.Itoa(capY),
+		"-video_size", fmt.Sprintf("%dx%d", capW, capH),
+		"-i", "desktop",
+		"-vf", vf,
+		"-c:v", "mjpeg", "-q:v", strconv.Itoa(ffQ),
+		"-f", "image2pipe", "pipe:1",
+	}
+
+	cmd := exec.Command(ffmpegPath, args...)
+	cmd.Stderr = log.Writer()
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, 0, 0
+	}
+	if err := cmd.Start(); err != nil {
+		log.Printf("ffmpeg 启动失败: %v", err)
+		return nil, 0, 0
+	}
+
+	log.Printf("ffmpeg: %s screen=%d phys=%dx%d@(%d,%d) cap=%dx%d@(%d,%d) out=%dx%d",
+		device, id, physW, physH, bounds.Min.X, bounds.Min.Y,
+		capW, capH, capX, capY, outW, outH)
+
+	ff := &ffSession{
+		cmd:     cmd,
+		stdout:  bufio.NewReaderSize(stdout, 256*1024),
+		frameCh: make(chan []byte, 1),
+		stopCh:  make(chan struct{}),
+	}
+
+	go func() {
+		buf := make([]byte, 0, 512*1024)
+		for {
+			select {
+			case <-ff.stopCh:
+				return
+			default:
+			}
+			jpg, err := readJPEG(ff.stdout, buf)
+			if err != nil {
+				return
+			}
+			buf = jpg
+			frame := make([]byte, len(jpg))
+			copy(frame, jpg)
+			select {
+			case ff.frameCh <- frame:
+			default:
+				<-ff.frameCh
+				ff.frameCh <- frame
+			}
+		}
+	}()
+
+	return ff, outW, outH
+}
+
+func readJPEG(br *bufio.Reader, buf []byte) ([]byte, error) {
+	buf = buf[:0]
+	prev := byte(0)
+	for {
+		b, err := br.ReadByte()
+		if err != nil {
+			return nil, err
+		}
+		if prev == 0xFF && b == 0xD8 {
+			buf = append(buf, 0xFF, 0xD8)
+			break
+		}
+		prev = b
+	}
+	prev = 0
+	for {
+		b, err := br.ReadByte()
+		if err != nil {
+			return nil, err
+		}
+		buf = append(buf, b)
+		if prev == 0xFF && b == 0xD9 {
+			break
+		}
+		prev = b
+	}
+	return buf, nil
+}
