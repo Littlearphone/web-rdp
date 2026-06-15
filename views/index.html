@@ -360,6 +360,10 @@
   maxwSelect.onchange = () => sendSettings()
 
   // ── 远程点击 ──
+  controlCheck.onchange = () => {
+    img.style.cursor = controlCheck.checked ? 'none' : 'crosshair'
+  }
+
   let active = false
   img.onmousedown = (e) => {
     active = controlCheck.checked
