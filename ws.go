@@ -16,7 +16,13 @@ import (
 )
 
 func handleWS(conn *websocket.Conn) {
-	defer func() { _ = conn.Close() }()
+	var ff *ffSession
+	defer func() {
+		if ff != nil {
+			ff.stop()
+		}
+		_ = conn.Close()
+	}()
 
 	var currentID atomic.Int32
 	var currentQuality atomic.Int32
@@ -24,7 +30,9 @@ func handleWS(conn *websocket.Conn) {
 	currentQuality.Store(75)
 	currentMaxW.Store(0)
 
+	readErr := make(chan struct{})
 	go func() {
+		defer close(readErr)
 		for {
 			_, msg, err := conn.ReadMessage()
 			if err != nil {
@@ -64,7 +72,6 @@ func handleWS(conn *websocket.Conn) {
 	}()
 
 	var (
-		ff           *ffSession
 		ffScreen     = -1
 		ffQ          = -1
 		ffMW         = -1
@@ -126,6 +133,13 @@ func handleWS(conn *websocket.Conn) {
 			var jpg []byte
 			select {
 			case jpg = <-ff.frameCh:
+				if jpg == nil {
+					ff = nil
+					ffScreen = -1
+					continue
+				}
+			case <-readErr:
+				return
 			case <-time.After(5 * time.Second):
 				log.Printf("ffmpeg 5 秒无帧，重启")
 				ff.stop()

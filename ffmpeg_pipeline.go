@@ -24,6 +24,7 @@ func (f *ffSession) stop() {
 		close(f.stopCh)
 		_ = f.cmd.Process.Kill()
 		_ = f.cmd.Wait()
+		close(f.frameCh) // 唤醒阻塞在 frameCh 上的 reader
 	}
 }
 
