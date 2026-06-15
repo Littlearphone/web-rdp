@@ -27,16 +27,13 @@ func initHTTPClient(proxy string) {
 		ForceAttemptHTTP2:     true,
 	}
 	if proxy != "" {
-		proxyURL, err := url.Parse("http://" + proxy)
-		if err == nil {
-			tr.Proxy = http.ProxyURL(proxyURL)
+		if u, err := url.Parse("http://" + proxy); err == nil {
+			tr.Proxy = http.ProxyURL(u)
 			fmt.Printf("使用代理: %s\n", proxy)
 		}
 	}
 	httpClient = &http.Client{Timeout: 5 * time.Minute, Transport: tr}
 }
-
-// ── Windows API ──
 
 var (
 	user32                  = syscall.NewLazyDLL("user32.dll")
@@ -59,66 +56,46 @@ type ctrlMsg struct {
 }
 
 type statsMsg struct {
-	FPS   float64 `json:"fps"`
-	EncMs float64 `json:"enc_ms"`
-	KB    float64 `json:"kb"`
-	Q     int     `json:"q"`
-	W     int     `json:"w"`
-	H     int     `json:"h"`
+	FPS     float64 `json:"fps"`
+	EncMs   float64 `json:"enc_ms"`
+	KB      float64 `json:"kb"`
+	Q       int     `json:"q"`
+	W       int     `json:"w"`
+	H       int     `json:"h"`
+	Screens int     `json:"screens"`
 }
 
 func main() {
 	var (
-		proxy  string
-		port   int
-		listen string
+		proxy     string
+		port      int
+		listen    string
+		ffmpegArg string
 	)
 	flag.StringVar(&proxy, "proxy", "", "HTTP 代理地址 (用于下载 ffmpeg)")
 	flag.IntVar(&port, "port", 9000, "监听端口")
-	flag.StringVar(&listen, "listen", "", "监听地址 (默认所有地址，可指定 127.0.0.1)")
+	flag.StringVar(&listen, "listen", "", "监听地址 (默认所有网卡)")
+	flag.StringVar(&ffmpegArg, "ffmpeg", "", "手动指定 ffmpeg.exe 路径")
 	flag.Usage = func() {
-		out := flag.CommandLine.Output()
-		_, _ = fmt.Fprintf(out, `Web 远程控制 v1.0 — 通过浏览器远程控制 Windows 桌面
-
-用法:
-  %s [-listen <IP>] [-port <端口>] [-proxy <代理>]
-
-参数说明:
-  -listen string
-        监听的 IP 地址
-        · 不填（默认）：监听所有网络接口（局域网可访问）
-        · 0.0.0.0      ：显式监听所有接口（同上）
-        · 127.0.0.1    ：仅本机可访问
-        · 192.168.1.x  ：仅监听指定网卡
-
-  -port int
-        监听的端口号 (默认: 9000)
-        · 1-1023 需要管理员权限
-        · 建议使用 1024-65535 之间的端口
-
-  -proxy string
-        HTTP 代理地址，用于下载 ffmpeg
-        · 格式: IP:端口 或 :端口（默认 localhost）
-        · 示例: -proxy 127.0.0.1:7890  或  -proxy :7890
-
-示例:
-  %-40s  默认配置
-  %-40s  指定端口
-  %-40s  仅本机访问
-  %-40s  局域网分享
-  %-40s  走代理下载 ffmpeg
-`, os.Args[0],
-			"web-rdp.exe",
-			"web-rdp.exe -port 8080",
-			"web-rdp.exe -listen 127.0.0.1",
-			"web-rdp.exe -listen 0.0.0.0 -port 9000",
-			"web-rdp.exe -proxy :7890")
+		o := flag.CommandLine.Output()
+		fmt.Fprintf(o, "Web 远程控制 v1.0\n\n用法: %s [选项]\n\n选项:\n", os.Args[0])
+		flag.PrintDefaults()
+		fmt.Fprint(o, "\n示例:\n  web-rdp.exe                                    默认 :9000\n  web-rdp.exe -port 8080                          指定端口\n  web-rdp.exe -listen 127.0.0.1                   仅本机\n  web-rdp.exe -ffmpeg C:\\tools\\ffmpeg.exe         手动指定 ffmpeg\n  web-rdp.exe -proxy :7890                        走代理下载\n")
 	}
 	flag.Parse()
 
+	if ffmpegArg != "" {
+		ffmpegPath = ffmpegArg
+		hasDXGI = checkDXGI(ffmpegArg)
+		useFFmpeg = true
+		fmt.Printf("使用指定 ffmpeg: %s\n", ffmpegArg)
+	}
+
 	_, _, _ = procSetProcessDPIAware.Call()
 	initHTTPClient(proxy)
-	detectFFmpeg()
+	if ffmpegArg == "" {
+		detectFFmpeg()
+	}
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {

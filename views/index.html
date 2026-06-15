@@ -27,8 +27,8 @@
   input[type=checkbox] { accent-color: #f1c40f; }
   label { cursor: pointer; }
   .sep { color: #444; }
-  #stats { font-size: 11px; color: #4ec9b0; min-width: 200px; text-align: right; }
-  #status-text { font-size: 11px; margin-left: 6px; cursor: pointer; white-space: nowrap; }
+  #stats { font-size: 12px; color: #4ec9b0; min-width: 200px; text-align: right; }
+  #status-text { font-size: 12px; margin-left: 6px; cursor: pointer; white-space: nowrap; }
 
   /* 连接弹窗 */
   #conn-overlay {
@@ -89,10 +89,7 @@
 
 <div id="bar">
   <span>屏幕</span>
-  <select id="screen-id">
-    <option value="0">主屏(0)</option>
-    <option value="1">副屏(1)</option>
-  </select>
+  <select id="screen-id"><option value="0">主屏</option></select>
   <span class="sep">|</span>
   <span>画质</span>
   <input type="range" id="quality" min="30" max="100" value="75" step="5">
@@ -106,7 +103,7 @@
   <span class="sep">|</span>
   <span id="stats">等待数据...</span>
   <span style="margin-left:auto;display:flex;align-items:center;gap:10px;">
-    <span id="change-server" style="cursor:pointer;font-size:11px;color:#bbb;border:1px solid #555;border-radius:3px;padding:2px 8px;user-select:none;" title="更换连接地址">⚙ 切换</span>
+    <span id="change-server" style="cursor:pointer;font-size:12px;color:#bbb;border:1px solid #555;border-radius:3px;padding:2px 8px;user-select:none;" title="更换连接地址">⚙ 切换</span>
     <span id="status-text" style="color:#e74c3c;">未连接</span>
   </span>
 </div>
@@ -155,6 +152,17 @@
       opts.push({ label: `${w}×${targetH}`, value: w })
     }
     return opts
+  }
+
+  let screenCount = 1
+  function updateScreenSelect(n) {
+    if (n === screenCount) return; screenCount = n
+    const cur = select.value; select.innerHTML = ''
+    for (let i = 0; i < n; i++) {
+      const el = document.createElement('option'); el.value = i
+      el.textContent = i === 0 ? `主屏 (${i})` : `副屏 (${i})`; select.appendChild(el)
+    }
+    select.value = cur < n ? cur : 0
   }
 
   function applyResolutions(pw, ph) {
@@ -227,6 +235,7 @@
           const s = JSON.parse(event.data)
           statsEl.innerHTML =
             `${s.w}×${s.h} Q${s.q} │ ${s.fps} fps │ 帧 ${s.enc_ms}ms │ ${s.kb}KB`
+          if (s.screens > 0) updateScreenSelect(s.screens)
         } catch (_) {}
         return
       }

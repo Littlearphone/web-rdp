@@ -110,7 +110,10 @@ func downloadAndExtract() {
 		// ── 解析下载地址 ──
 		dlURL := resolveDownloadURL()
 		if dlURL == "" {
-			fmt.Println("  无法获取下载地址，请检查网络或手动安装 ffmpeg")
+			fmt.Println("  无法获取下载地址")
+			fmt.Println("  请前往: https://github.com/BtbN/FFmpeg-Builds/releases")
+			fmt.Println("  选择 win64-gpl.zip 下载到本地，解压后使用 -ffmpeg 指定路径")
+			fmt.Println("  或在命令提示符中执行: winget install ffmpeg")
 			return
 		}
 

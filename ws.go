@@ -157,10 +157,10 @@ func handleWS(conn *websocket.Conn) {
 				fps := float64(frames) / elapsed.Seconds()
 				maxW := float64(maxWait.Microseconds()) / 1000
 				stat := statsMsg{
-					FPS:   math.Round(fps*10) / 10,
-					EncMs: math.Round(maxW*10) / 10,
-					KB:    math.Round(float64(len(msg))/102.4) / 10,
-					Q:     q, W: cachedBounds.Dx(), H: cachedBounds.Dy(),
+					FPS:     math.Round(fps*10) / 10,
+					EncMs:   math.Round(maxW*10) / 10,
+					KB:      math.Round(float64(len(msg))/102.4) / 10,
+					Screens: screenshot.NumActiveDisplays(), Q: q, W: cachedBounds.Dx(), H: cachedBounds.Dy(),
 				}
 				if b, _ := json.Marshal(stat); b != nil {
 					select {
@@ -219,10 +219,10 @@ func handleWS(conn *websocket.Conn) {
 			fps := float64(frames) / elapsed.Seconds()
 			maxW := float64(maxWait.Microseconds()) / 1000
 			stat := statsMsg{
-				FPS:   math.Round(fps*10) / 10,
-				EncMs: math.Round(maxW*10) / 10,
-				KB:    math.Round(float64(len(msg))/102.4) / 10,
-				Q:     q, W: cachedBounds.Dx(), H: cachedBounds.Dy(),
+				FPS:     math.Round(fps*10) / 10,
+				EncMs:   math.Round(maxW*10) / 10,
+				KB:      math.Round(float64(len(msg))/102.4) / 10,
+				Screens: screenshot.NumActiveDisplays(), Q: q, W: cachedBounds.Dx(), H: cachedBounds.Dy(),
 			}
 			if b, _ := json.Marshal(stat); b != nil {
 				select {
