@@ -2,398 +2,193 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>Web远程控制</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    width: 100vw; height: 100vh; background: #000; color: #ddd;
-    display: flex; flex-direction: column; overflow: hidden; font-family: sans-serif;
-  }
-  #bar {
-    min-height: 36px; background: #1a1a1a; display: flex; align-items: center;
-    flex-wrap: wrap; padding: 4px 10px; border-bottom: 1px solid #333;
-    font-size: 12px; gap: 8px; user-select: none;
-  }
-  #view {
-    flex: 1; display: flex; align-items: center; justify-content: center; overflow: hidden;
-  }
-  #screen {
-    max-width: 100%; max-height: 100%; object-fit: contain; cursor: crosshair;
-  }
-  select, input[type=range], input[type=text], input[type=number] {
-    background: #333; color: #fff; border: 1px solid #555; border-radius: 3px; padding: 2px 4px;
-  }
-  input[type=range] { width: 80px; accent-color: #f1c40f; padding: 0; }
+  body { width: 100vw; height: 100vh; background: #000; color: #ddd; font-family: sans-serif; overflow: hidden; }
+
+  #main { display: flex; flex-direction: column; height: 100%; }
+  #view { flex: 1; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  #screen { max-width: 100%; max-height: 100%; object-fit: contain; cursor: crosshair; }
+  #reconnect-hint { display: none; position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #1a1a1a; border: 1px solid #f1c40f; border-radius: 6px; padding: 10px 20px; color: #f1c40f; font-size: 13px; z-index: 100; white-space: nowrap; gap: 12px; align-items: center; }
+  #reconnect-hint button { background: #f1c40f; color: #000; border: none; border-radius: 3px; padding: 4px 14px; cursor: pointer; font-weight: 600; font-size: 12px; }
+
+  /* ── 桌面顶栏 ── */
+  #bar { background: #1a1a1a; display: flex; align-items: center; padding: 4px 10px; border-bottom: 1px solid #333; font-size: 12px; gap: 8px; user-select: none; min-height: 36px; flex-shrink: 0; }
+  #bar .sep { color: #444; }
+  select, input[type=range] { background: #333; color: #fff; border: 1px solid #555; border-radius: 3px; padding: 2px 4px; }
+  input[type=range] { width: 70px; accent-color: #f1c40f; padding: 0; }
   input[type=checkbox] { accent-color: #f1c40f; }
   label { cursor: pointer; }
-  .sep { color: #444; }
-  #stats { font-size: 12px; color: #4ec9b0; min-width: 200px; text-align: right; }
-  #status-text { font-size: 12px; margin-left: 6px; cursor: pointer; white-space: nowrap; }
+  #stats { font-size: 12px; color: #4ec9b0; text-align: right; }
+  #status-text { font-size: 12px; cursor: pointer; white-space: nowrap; }
 
-  /* 连接弹窗 */
-  #conn-overlay {
-    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-    background: rgba(0,0,0,0.85); z-index: 999;
-    display: flex; align-items: center; justify-content: center;
-  }
-  #conn-dialog {
-    background: #1e1e1e; border: 1px solid #444; border-radius: 8px;
-    padding: 28px 32px; text-align: center; min-width: 320px;
-  }
-  #conn-dialog h3 { margin-bottom: 20px; font-weight: 400; }
-  #conn-dialog .row {
-    display: flex; align-items: center; justify-content: center; gap: 6px; margin-bottom: 14px;
-  }
-  #conn-dialog .row label { min-width: 30px; color: #999; font-size: 13px; }
-  #conn-dialog input[type=text], #conn-dialog input[type=number] {
-    font-size: 14px; padding: 6px 10px; width: 140px;
-  }
-  #conn-dialog button {
-    margin-top: 10px; padding: 8px 40px; font-size: 14px;
-    background: #f1c40f; color: #000; border: none; border-radius: 4px; cursor: pointer; font-weight: 600;
-  }
-  #conn-dialog button:hover { background: #f39c12; }
-  #conn-msg { color: #e74c3c; font-size: 12px; margin-top: 8px; min-height: 18px; }
+  /* ── 手机 ── */
+  @media (max-width: 900px) {
+    #screen { cursor: default; }
+    select, input[type=range], #bar .sep, #enable-control, #enable-control-label, #status-text, .desktop-only { display: none; }
+    #bar { font-size: 11px; gap: 12px; align-items: center; background: rgba(26,26,26,0.92); backdrop-filter: blur(4px); flex-shrink: 0; }
+    #main { display: flex; }
+    #view { flex: 1; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+    .ctrl-btn {
+      background: #333; color: #ccc; border: 1px solid #555; border-radius: 3px;
+      padding: 4px 8px; font-size: 12px; cursor: pointer; white-space: nowrap;
+    }
+    .ctrl-btn.active { background: #f1c40f; color: #000; border-color: #f1c40f; }
+    .ctrl-group { display: flex; gap: 3px; }
+    #stats { font-size: 10px; color: #4ec9b0; text-align: center; }
 
-  /* 重连提示 */
-  #reconnect-hint {
-    display: none; position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
-    background: #1a1a1a; border: 1px solid #f1c40f; border-radius: 6px;
-    padding: 10px 20px; color: #f1c40f; font-size: 13px; z-index: 100;
-    white-space: nowrap; gap: 12px; align-items: center;
-  }
-  #reconnect-hint button {
-    background: #f1c40f; color: #000; border: none; border-radius: 3px;
-    padding: 4px 14px; cursor: pointer; font-weight: 600; font-size: 12px;
+    /* 竖屏：文字行 + 按钮行 */
+    @media (orientation: portrait) {
+      #main { flex-direction: column; }
+      #bar { flex-direction: column; padding: 5px 10px; border-bottom: 1px solid #333; gap: 4px; }
+      #stats { text-align: center; font-size: 11px; padding: 2px 0; }
+      .ctrl-rows { width: 100%; display: flex; flex-direction: column; gap: 4px; }
+      .ctrl-row { display: flex; align-items: center; justify-content: space-between; }
+      .ctrl-btn { padding: 4px 10px; font-size: 12px; }
+      .ctrl-group { display: flex; gap: 4px; }
+    }
+    /* 横屏：左侧栏，stats在上按钮在下 */
+    @media (orientation: landscape) {
+      #main { flex-direction: row; }
+      #bar { flex-direction: column; padding: 8px 3px; width: 54px; border-right: 1px solid #333; align-items: center; }
+      #stats { font-size: 9px; text-align: center; line-height: 1.4; padding: 4px 0; width: 100%; border-bottom: 1px solid rgba(255,255,255,0.1); }
+      .ctrl-rows { flex: 1; display: flex; flex-direction: column; justify-content: space-evenly; align-items: center; width: 100%; padding: 6px 0; }
+      .ctrl-row { height: 100%; display: flex; flex-direction: column; align-items: center; gap: 4px; justify-content: space-between; }
+      .ctrl-group { display: flex; flex-direction: column; gap: 4px; }
+      .ctrl-btn { padding: 5px 3px; font-size: 10px; text-align: center; min-width: 44px; }
+    }
   }
 </style>
 </head>
 <body>
-
-<div id="conn-overlay">
-  <div id="conn-dialog">
-    <h3>连接到远程桌面</h3>
-    <div class="row">
-      <label>IP</label>
-      <input type="text" id="conn-ip" value="localhost" placeholder="IP">
-      <label>:</label>
-      <input type="number" id="conn-port" value="9000" placeholder="端口" min="1" max="65535">
-    </div>
-    <div style="display:flex;gap:10px;justify-content:center;">
-      <button onclick="doConnect()">连 接</button>
-      <button onclick="document.getElementById('conn-overlay').style.display='none'" style="background:#444;color:#ddd;font-weight:400;">取消</button>
-    </div>
-    <div id="conn-msg"></div>
+<div id="main">
+  <div id="bar">
+    <!-- 桌面控件 -->
+    <span class="desktop-only">屏幕</span><select id="screen-id"><option value="0">主屏</option></select>
+    <span class="sep desktop-only">|</span><span class="desktop-only">画质</span><input type="range" id="quality" min="30" max="100" value="75" step="5"><span id="quality-val" class="desktop-only">75</span>
+    <span class="sep desktop-only">|</span><span class="desktop-only">分辨率</span><select id="maxw"><option value="0">原始</option></select>
+    <span class="sep desktop-only">|</span><input type="checkbox" id="enable-control"><label for="enable-control" class="desktop-only" id="enable-control-label">控制</label>
+    <span class="sep desktop-only">|</span>
+    <span id="stats">等待...</span>
+    <span style="margin-left:auto;" class="desktop-only"><span id="status-text" style="color:#f1c40f;">连接中...</span></span>
   </div>
+  <div id="view"><img id="screen" src="" alt="等待画面信号..."></div>
 </div>
-
-<div id="bar">
-  <span>屏幕</span>
-  <select id="screen-id"><option value="0">主屏</option></select>
-  <span class="sep">|</span>
-  <span>画质</span>
-  <input type="range" id="quality" min="30" max="100" value="75" step="5">
-  <span id="quality-val" style="min-width:26px;">75</span>
-  <span class="sep">|</span>
-  <span>分辨率</span>
-  <select id="maxw"><option value="0">原始</option></select>
-  <span class="sep">|</span>
-  <input type="checkbox" id="enable-control">
-  <label for="enable-control">控制</label>
-  <span class="sep">|</span>
-  <span id="stats">等待数据...</span>
-  <span style="margin-left:auto;display:flex;align-items:center;gap:10px;">
-    <span id="change-server" style="cursor:pointer;font-size:12px;color:#bbb;border:1px solid #555;border-radius:3px;padding:2px 8px;user-select:none;" title="更换连接地址">⚙ 切换</span>
-    <span id="status-text" style="color:#e74c3c;">未连接</span>
-  </span>
-</div>
-<div id="view">
-  <img id="screen" src="" alt="等待画面信号...">
-</div>
-
-<div id="reconnect-hint">
-  <span id="reconnect-msg"></span>
-  <button onclick="manualReconnect()">立即重连</button>
-</div>
+<div id="reconnect-hint"><span id="reconnect-msg"></span><button onclick="manualReconnect()">立即重连</button></div>
 
 <script>
-  const overlay = document.getElementById('conn-overlay')
-  const connIp = document.getElementById('conn-ip')
-  const connPort = document.getElementById('conn-port')
-  const connMsg = document.getElementById('conn-msg')
-  const img = document.getElementById('screen')
-  const select = document.getElementById('screen-id')
-  const statusEl = document.getElementById('status-text')
-  const controlCheck = document.getElementById('enable-control')
-  const qualitySlider = document.getElementById('quality')
-  const qualityVal = document.getElementById('quality-val')
-  const maxwSelect = document.getElementById('maxw')
-  const statsEl = document.getElementById('stats')
-  const reconnectHint = document.getElementById('reconnect-hint')
-  const reconnectMsg = document.getElementById('reconnect-msg')
-  const changeServerLink = document.getElementById('change-server')
+  const img = document.getElementById('screen'), select = document.getElementById('screen-id')
+  const statusEl = document.getElementById('status-text'), controlCheck = document.getElementById('enable-control')
+  const qualitySlider = document.getElementById('quality'), qualityVal = document.getElementById('quality-val')
+  const maxwSelect = document.getElementById('maxw'), statsEl = document.getElementById('stats')
+  const reconnectHint = document.getElementById('reconnect-hint'), reconnectMsg = document.getElementById('reconnect-msg')
+  const bar = document.getElementById('bar')
+  const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
 
   let meta = { ox: 0, oy: 0, pw: 1, ph: 1, zoom: 1.0 }
-  let serverAddr = ''
-  let ws = null
-  let reconnectTimer = null
-  let reconnectDelay = 5
-  let reconnectCountdown = 0
-  let wasConnected = false
-  let lastResKey = ''
+  let serverAddr = window.location.host
+  let ws = null, reconnectTimer = null, reconnectDelay = 5, reconnectCountdown = 0, wasConnected = false, lastResKey = ''
+  let currentQ = 75, currentMW = 0, currentScreen = 0, screenCount = 1
+  let mobileResOpts = []
 
-  // ── 分辨率选项动态生成（最小 480p）──
-  function buildResolutions(pw, ph) {
-    const opts = [{ label: `原始 (${pw}×${ph})`, value: 0 }]
-    // 按高度定档：1080p / 720p / 480p
-    for (const targetH of [1080, 720, 480]) {
-      if (targetH >= ph) continue
-      const w = Math.round(pw * targetH / ph)
-      opts.push({ label: `${w}×${targetH}`, value: w })
-    }
-    return opts
-  }
-
-  let screenCount = 1
-  function updateScreenSelect(n) {
-    if (n === screenCount) return; screenCount = n
-    const cur = select.value; select.innerHTML = ''
-    for (let i = 0; i < n; i++) {
-      const el = document.createElement('option'); el.value = i
-      el.textContent = i === 0 ? `主屏 (${i})` : `副屏 (${i})`; select.appendChild(el)
-    }
-    select.value = cur < n ? cur : 0
-  }
-
-  function applyResolutions(pw, ph) {
-    const key = `${pw}x${ph}`
-    if (key === lastResKey) return
-    lastResKey = key
-    const opts = buildResolutions(pw, ph)
-    const cur = maxwSelect.value
-    maxwSelect.innerHTML = ''
-    opts.forEach(o => {
-      const el = document.createElement('option')
-      el.value = o.value; el.textContent = o.label
-      maxwSelect.appendChild(el)
-    })
-    // 尝试保持当前选择
-    if (opts.find(o => String(o.value) === cur)) maxwSelect.value = cur
-  }
-
-  // ── 连接 ──
-  function doConnect() {
-    const ip = connIp.value.trim() || 'localhost'
-    const port = parseInt(connPort.value) || 9000
-    const addr = `${ip}:${port}`
-
-    // 相同地址且已连接 → 直接关闭弹窗
-    if (addr === serverAddr && ws && ws.readyState === WebSocket.OPEN) {
-      overlay.style.display = 'none'
-      return
-    }
-
-    // 不同地址 → 断开旧连接
-    serverAddr = addr
-    connMsg.textContent = ''
-    wasConnected = false
-    if (ws) { ws.onclose = null; ws.close(); ws = null }
-    connect()
-  }
-
-  connIp.addEventListener('keydown', e => { if (e.key === 'Enter') doConnect() })
-  connPort.addEventListener('keydown', e => { if (e.key === 'Enter') doConnect() })
+  function send(o) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(o)) }
+  function sendSettings() { send({ quality: currentQ, maxw: currentMW }) }
 
   function connect() {
-    if (ws) { ws.onclose = null; ws.close(); ws = null }
-    clearReconnectTimer()
-    reconnectHint.style.display = 'none'
-
-    statusEl.textContent = '连接中...'
-    statusEl.style.color = '#f1c40f'
-    statsEl.innerHTML = '等待数据...'
-    lastResKey = ''
-
-    const url = `ws://${serverAddr}/ws`
-    ws = new WebSocket(url)
-    ws.binaryType = 'arraybuffer'
-
-    ws.onopen = () => {
-      wasConnected = true
-      overlay.style.display = 'none'
-      statusEl.textContent = '已连接'
-      statusEl.style.color = '#27ae60'
-      reconnectDelay = 5
-      sendSettings()
-    }
-
-    let latestJpg = null, latestMeta = null, rafId = null
-
+    if (ws) { ws.onclose = null; ws.close(); ws = null }; clearReconnectTimer(); reconnectHint.style.display = 'none'; lastResKey = ''
+    statusEl.textContent = '连接中...'; statusEl.style.color = '#f1c40f'
+    ws = new WebSocket(`ws://${serverAddr}/ws`); ws.binaryType = 'arraybuffer'
+    ws.onopen = () => { wasConnected = true; statusEl.textContent = '已连接'; statusEl.style.color = '#27ae60'; reconnectDelay = 5; sendSettings() }
     ws.onmessage = (event) => {
       if (typeof event.data === 'string') {
-        try {
-          const s = JSON.parse(event.data)
-          statsEl.innerHTML =
-            `${s.w}×${s.h} Q${s.q} │ ${s.fps} fps │ 帧 ${s.enc_ms}ms │ ${s.kb}KB`
-          if (s.screens > 0) updateScreenSelect(s.screens)
-        } catch (_) {}
+        try { const s = JSON.parse(event.data); if (isMobile) { const p = matchMedia('(orientation: portrait)').matches; statsEl.innerHTML = p ? `&emsp;${s.fps}fps&emsp;&emsp;${s.kb}KB&emsp;` : `${s.fps}fps<br>${s.kb}KB` } else { statsEl.innerHTML = `${s.w}×${s.h} Q${s.q} │ ${s.fps}fps │ ${s.enc_ms}ms │ ${s.kb}KB/f │ ${(s.kb*s.fps/1024).toFixed(1)}MB/s` }; if (s.screens > 0 && s.screens !== screenCount) { screenCount = s.screens; isMobile ? updateMobileUI() : updateDesktopScreens() } } catch (_) {}
         return
       }
-      const buf = event.data
-      const dv = new DataView(buf)
-      latestMeta = {
-        ox: dv.getInt32(0, true), oy: dv.getInt32(4, true),
-        pw: dv.getInt32(8, true), ph: dv.getInt32(12, true),
-        zoom: dv.getFloat64(16, true)
-      }
-      applyResolutions(latestMeta.pw, latestMeta.ph)
-      latestJpg = new Uint8Array(buf, 24)
-
-      // 只在没排期渲染时才请求新一帧（rAF 节流，展现最新帧）
-      if (rafId === null) {
-        rafId = requestAnimationFrame(() => {
-          rafId = null
-          if (!latestJpg) return
-          const blob = new Blob([latestJpg], { type: 'image/jpeg' })
-          const url = URL.createObjectURL(blob)
-          const old = img.src
-          img.src = url
-          if (old && old.startsWith('blob:')) URL.revokeObjectURL(old)
-          meta = latestMeta
-          latestJpg = null
-        })
-      }
+      const buf = event.data, dv = new DataView(buf)
+      meta = { ox: dv.getInt32(0, true), oy: dv.getInt32(4, true), pw: dv.getInt32(8, true), ph: dv.getInt32(12, true), zoom: dv.getFloat64(16, true) }
+      if (isMobile) updateMobileResolutions(meta.pw, meta.ph)
+      else { const key = `${meta.pw}x${meta.ph}`; if (key !== lastResKey) { lastResKey = key; buildDesktopResolutions(meta.pw, meta.ph) } }
+      const jpg = new Uint8Array(buf, 24), blob = new Blob([jpg], { type: 'image/jpeg' }), url = URL.createObjectURL(blob)
+      const old = img.src; img.src = url; if (old && old.startsWith('blob:')) URL.revokeObjectURL(old)
     }
+    ws.onclose = () => { statusEl.textContent = '连接断开'; statusEl.style.color = '#e74c3c'; statsEl.innerHTML = '离线'; if (wasConnected) startReconnect() }
+    ws.onerror = () => { if (!wasConnected) { statusEl.textContent = '连接失败'; statusEl.style.color = '#e74c3c' } }
+  }
+  connect()
 
-    ws.onclose = () => {
-      statusEl.textContent = '连接断开'
-      statusEl.style.color = '#e74c3c'
-      statsEl.innerHTML = '离线'
-      if (wasConnected) startReconnect()
+  function startReconnect() { scheduleReconnect() }
+  function scheduleReconnect() { clearReconnectTimer(); reconnectCountdown = reconnectDelay; updateReconnectUI(); reconnectHint.style.display = 'flex'; reconnectTimer = setInterval(() => { reconnectCountdown--; if (reconnectCountdown <= 0) { clearReconnectTimer(); reconnectHint.style.display = 'none'; reconnectDelay = Math.min(reconnectDelay * 2, 30); connect(); return }; updateReconnectUI() }, 1000) }
+  function updateReconnectUI() { reconnectMsg.textContent = `${reconnectCountdown} 秒后自动重连...` }
+  function manualReconnect() { clearReconnectTimer(); reconnectHint.style.display = 'none'; connect() }
+  function clearReconnectTimer() { if (reconnectTimer) { clearInterval(reconnectTimer); reconnectTimer = null } }
+  statusEl.onclick = () => { if (!ws || ws.readyState !== WebSocket.OPEN) { clearReconnectTimer(); reconnectHint.style.display = 'none'; connect() } }
+
+  // ── 桌面端 ──
+  if (!isMobile) {
+    function updateDesktopScreens() {
+      const cur = select.value; select.innerHTML = ''
+      for (let i = 0; i < screenCount; i++) { const el = document.createElement('option'); el.value = i; el.textContent = i === 0 ? '主屏 (0)' : `副屏 (${i})`; select.appendChild(el) }
+      select.value = cur < screenCount ? cur : '0'
     }
-
-    ws.onerror = () => {
-      if (!wasConnected) {
-        connMsg.textContent = '连接失败，请检查 IP 和端口'
-        statusEl.textContent = '未连接'
-        statusEl.style.color = '#e74c3c'
-      }
+    function buildDesktopResolutions(pw, ph) {
+      const opts = [{ label: `原始 (${pw}×${ph})`, value: 0 }]; for (const th of [1080, 720, 480]) { if (th >= ph) continue; opts.push({ label: `${Math.round(pw*th/ph)}×${th}`, value: Math.round(pw*th/ph) }) }
+      const cur = maxwSelect.value; maxwSelect.innerHTML = ''; opts.forEach(o => { const el = document.createElement('option'); el.value = o.value; el.textContent = o.label; maxwSelect.appendChild(el) }); maxwSelect.value = opts.find(o => String(o.value) === cur) ? cur : '0'
     }
+    qualitySlider.oninput = () => { qualityVal.textContent = qualitySlider.value }; qualitySlider.onchange = () => { currentQ = parseInt(qualitySlider.value); sendSettings() }
+    maxwSelect.onchange = () => { currentMW = parseInt(maxwSelect.value); sendSettings() }
+    select.onchange = () => { currentScreen = parseInt(select.value); send({ screen: currentScreen }); lastResKey = '' }
   }
 
-  // ── 自动重连（5s 起，逐次加倍，最长 30s）──
-  function startReconnect() {
-    scheduleReconnect()
-  }
-
-  function scheduleReconnect() {
-    clearReconnectTimer()
-    reconnectCountdown = reconnectDelay
-    updateReconnectUI()
-    reconnectHint.style.display = 'flex'
-
-    reconnectTimer = setInterval(() => {
-      reconnectCountdown--
-      if (reconnectCountdown <= 0) {
-        clearReconnectTimer()
-        reconnectHint.style.display = 'none'
-        reconnectDelay = Math.min(reconnectDelay * 2, 30)
-        connect()
-        return
-      }
-      updateReconnectUI()
-    }, 1000)
-  }
-
-  function updateReconnectUI() {
-    reconnectMsg.textContent = `${reconnectCountdown} 秒后自动重连...`
-  }
-
-  function manualReconnect() {
-    clearReconnectTimer()
-    reconnectHint.style.display = 'none'
-    connect()
-  }
-
-  function clearReconnectTimer() {
-    if (reconnectTimer) { clearInterval(reconnectTimer); reconnectTimer = null }
-  }
-
-  // 切换服务器 → 弹窗（不断开当前连接）
-  changeServerLink.onclick = () => {
-    clearReconnectTimer()
-    reconnectHint.style.display = 'none'
-    if (serverAddr) {
-      const parts = serverAddr.split(':')
-      connIp.value = parts[0] || 'localhost'
-      connPort.value = parts[1] || '9000'
+  // ── 手机端 ──
+  if (isMobile) {
+    function updateMobileResolutions(pw, ph) {
+      const maxW = Math.min(pw, Math.round(window.innerWidth * (window.devicePixelRatio || 1)))
+      mobileResOpts = [{ label: `适配`, w: maxW }]
+      for (const th of [720, 480]) { if (th >= ph) continue; const w = Math.round(pw * th / ph); mobileResOpts.push({ label: `${th}p`, w: w }) }
+      // 去重
+      mobileResOpts = mobileResOpts.filter((o, i) => mobileResOpts.findIndex(x => x.w === o.w) === i)
+      if (!currentMW || !mobileResOpts.find(o => o.w === currentMW)) currentMW = mobileResOpts[0].w
+      updateMobileUI()
     }
-    overlay.style.display = 'flex'
-    connMsg.textContent = ''
-    connIp.focus()
-  }
+    function updateMobileUI() {
+      bar.querySelectorAll('.ctrl-rows,.ctrl-row,.ctrl-btn,.ctrl-group').forEach(e => e.remove())
+      // 按钮容器
+      let rows = bar.querySelector('.ctrl-rows')
+      if (!rows) { rows = document.createElement('div'); rows.className = 'ctrl-rows'; bar.appendChild(rows) }
+      const row = () => { const d = document.createElement('div'); d.className = 'ctrl-row'; rows.appendChild(d); return d }
+      const addBtn = (r, text, active, click) => { const b = document.createElement('span'); b.className = 'ctrl-btn' + (active ? ' active' : ''); b.textContent = text; b.onclick = click; r.appendChild(b) }
+      const addGroup = (r, btns) => { const g = document.createElement('span'); g.className = 'ctrl-group'; btns.forEach(b => { const el = document.createElement('span'); el.className = 'ctrl-btn' + (b.active ? ' active' : ''); el.textContent = b.label; el.onclick = b.click; g.appendChild(el) }); r.appendChild(g) }
 
-  // 状态栏点击重连
-  statusEl.onclick = () => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      clearReconnectTimer()
-      reconnectHint.style.display = 'none'
-      connect()
+      const r = row()
+      if (screenCount > 1) addBtn(r, `屏${currentScreen}`, false, () => { currentScreen = (currentScreen + 1) % screenCount; send({ screen: currentScreen }); updateMobileUI() })
+      addGroup(r, [
+        { label: '低', active: currentQ === 40, click: () => { currentQ = 40; sendSettings(); updateMobileUI() } },
+        { label: '中', active: currentQ === 60, click: () => { currentQ = 60; sendSettings(); updateMobileUI() } },
+        { label: '高', active: currentQ === 80, click: () => { currentQ = 80; sendSettings(); updateMobileUI() } },
+      ])
+      addGroup(r, mobileResOpts.map(o => ({ label: o.label, active: currentMW === o.w, click: () => { currentMW = o.w; sendSettings(); updateMobileUI() } })))
     }
+    // 初始化默认值
+    currentQ = 60; currentMW = 0
   }
 
-  // ── 控制消息 ──
-  function sendSettings() {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return
-    ws.send(JSON.stringify({
-      quality: parseInt(qualitySlider.value),
-      maxw: parseInt(maxwSelect.value)
-    }))
+  // ── 桌面控制功能 ──
+  if (!isMobile) {
+    controlCheck.onchange = () => { img.style.cursor = controlCheck.checked ? 'none' : 'crosshair' }
+    let active = false, dragStart = null, dragging = false
+    img.onmousedown = (e) => { if (!controlCheck.checked || e.target !== img) return; e.preventDefault(); if (e.button === 0) { active = true; const c = screenCoords(e); if (c.fx == null) return; dragStart = c; dragging = false } }
+    img.onmousemove = (e) => { if (!active || !dragStart) return; const c = screenCoords(e); if (c.fx == null) return; if (Math.abs(c.fx - dragStart.fx) > 3 || Math.abs(c.fy - dragStart.fy) > 3) dragging = true }
+    img.onmouseup = (e) => { if (!active) return; active = false; e.preventDefault(); const c = screenCoords(e); if (c.fx == null) return; if (dragging) { send({ dx1: dragStart.fx, dy1: dragStart.fy, dx2: c.fx, dy2: c.fy }) } else { fetch(`http://${serverAddr}/click?x=${c.fx}&y=${c.fy}`).catch(() => {}) }; dragging = false; dragStart = null }
+    view.addEventListener('contextmenu', (e) => { if (!controlCheck.checked || e.target !== img) return; e.preventDefault(); const c = screenCoords(e); if (c.fx == null) return; send({ rx: c.fx, ry: c.fy }) })
+    const preventCodes = new Set(['F1','F3','F5','F11','F12','Tab','Escape','AltLeft','AltRight','ControlLeft','ControlRight','MetaLeft','MetaRight'])
+    window.addEventListener('keydown', (e) => { if (!controlCheck.checked) return; if (preventCodes.has(e.code) || e.ctrlKey || e.altKey || e.metaKey) { e.preventDefault(); e.stopPropagation() }; send({ key: e.code, down: true }) }, { capture: true })
+    window.addEventListener('keyup', (e) => { if (!controlCheck.checked) return; e.preventDefault(); e.stopPropagation(); send({ key: e.code, down: false }) }, { capture: true })
   }
 
-  select.onchange = () => {
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(select.value)
-    lastResKey = '' // 切屏后重建分辨率列表
-  }
-  qualitySlider.oninput = () => { qualityVal.textContent = qualitySlider.value }
-  qualitySlider.onchange = () => { qualityVal.textContent = qualitySlider.value; sendSettings() }
-  maxwSelect.onchange = () => sendSettings()
-
-  // ── 远程点击 ──
-  controlCheck.onchange = () => {
-    img.style.cursor = controlCheck.checked ? 'none' : 'crosshair'
-  }
-
-  let active = false
-  img.onmousedown = (e) => {
-    active = controlCheck.checked
-    if (!active) return
-    e.preventDefault()
-  }
-  img.onmouseup = (e) => {
-    if (!active) return
-    active = false
-    e.preventDefault()
-    const rect = img.getBoundingClientRect()
-    const ratio = meta.pw / meta.ph
-    const cRatio = rect.width / rect.height
-    let aw, ah, ox = 0, oy = 0
-    if (ratio > cRatio) {
-      aw = rect.width; ah = rect.width / ratio; oy = (rect.height - ah) / 2
-    } else {
-      ah = rect.height; aw = rect.height * ratio; ox = (rect.width - aw) / 2
-    }
-    const cx = (e.clientX - rect.left - ox) / aw
-    const cy = (e.clientY - rect.top - oy) / ah
-    if (cx < 0 || cx > 1 || cy < 0 || cy > 1) return
-    const fx = Math.round((meta.ox * meta.zoom) + (cx * meta.pw * meta.zoom))
-    const fy = Math.round((meta.oy * meta.zoom) + (cy * meta.ph * meta.zoom))
-    fetch(`http://${serverAddr}/click?x=${fx}&y=${fy}`)
-      .then(r => r.text()).then(d => console.log('点击:', d))
-      .catch(e => console.error('点击失败:', e))
-  }
-
-  connIp.focus()
+  function eventPos(e) { const t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]); if (t) return { clientX: t.clientX, clientY: t.clientY, target: e.target }; return { clientX: e.clientX, clientY: e.clientY, target: e.target } }
+  function screenCoords(e) { const p = eventPos(e), rect = img.getBoundingClientRect(), ratio = meta.pw / meta.ph, cRatio = rect.width / rect.height; let aw, ah, ox = 0, oy = 0; if (ratio > cRatio) { aw = rect.width; ah = rect.width / ratio; oy = (rect.height - ah) / 2 } else { ah = rect.height; aw = rect.height * ratio; ox = (rect.width - aw) / 2 }; const cx = (p.clientX - rect.left - ox) / aw, cy = (p.clientY - rect.top - oy) / ah; if (cx < 0 || cx > 1 || cy < 0 || cy > 1) return {}; return { fx: Math.round((meta.ox * meta.zoom) + (cx * meta.pw * meta.zoom)), fy: Math.round((meta.oy * meta.zoom) + (cy * meta.ph * meta.zoom)) } }
 </script>
 </body>
 </html>

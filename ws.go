@@ -41,6 +41,18 @@ func handleWS(conn *websocket.Conn) {
 				if cm.MaxW != nil {
 					currentMaxW.Store(int32(*cm.MaxW))
 				}
+				if cm.Text != nil && *cm.Text != "" {
+					doTypeText(*cm.Text)
+				}
+				if cm.Key != nil && cm.KeyDown != nil {
+					doKey(*cm.Key, *cm.KeyDown)
+				}
+				if cm.RX != nil && cm.RY != nil {
+					doRightClick(int32(*cm.RX), int32(*cm.RY))
+				}
+				if cm.DX1 != nil {
+					doDrag(int32(*cm.DX1), int32(*cm.DY1), int32(*cm.DX2), int32(*cm.DY2))
+				}
 				continue
 			}
 			id, err := strconv.Atoi(string(msg))

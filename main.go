@@ -39,9 +39,75 @@ var (
 	user32                  = syscall.NewLazyDLL("user32.dll")
 	procSetCursorPos        = user32.NewProc("SetCursorPos")
 	procMouseWait           = user32.NewProc("mouse_event")
+	procKeybdWait           = user32.NewProc("keybd_event")
 	procEnumDisplayMonitors = user32.NewProc("EnumDisplayMonitors")
 	procSetProcessDPIAware  = user32.NewProc("SetProcessDPIAware")
 )
+
+var keyCodeMap = map[string]uintptr{
+	"Backspace": 0x08, "Tab": 0x09, "Enter": 0x0D,
+	"ShiftLeft": 0xA0, "ShiftRight": 0xA1,
+	"ControlLeft": 0xA2, "ControlRight": 0xA3,
+	"AltLeft": 0xA4, "AltRight": 0xA5,
+	"CapsLock": 0x14, "Escape": 0x1B, "Space": 0x20,
+	"PageUp": 0x21, "PageDown": 0x22, "End": 0x23, "Home": 0x24,
+	"ArrowLeft": 0x25, "ArrowUp": 0x26, "ArrowRight": 0x27, "ArrowDown": 0x28,
+	"Insert": 0x2D, "Delete": 0x2E,
+	"MetaLeft": 0x5B, "MetaRight": 0x5C,
+	"F1": 0x70, "F2": 0x71, "F3": 0x72, "F4": 0x73,
+	"F5": 0x74, "F6": 0x75, "F7": 0x76, "F8": 0x77,
+	"F9": 0x78, "F10": 0x79, "F11": 0x7A, "F12": 0x7B,
+}
+
+func doTypeText(text string) {
+	for _, r := range text {
+		vk := uintptr(r)
+		_, _, _ = procKeybdWait.Call(vk, 0, 0, 0)      // down
+		_, _, _ = procKeybdWait.Call(vk, 0, 0x0002, 0) // up
+	}
+}
+
+func doKey(code string, down bool) {
+	vk, ok := keyCodeMap[code]
+	if !ok && len(code) >= 4 && code[:3] == "Key" {
+		vk = uintptr(code[3])
+	} else if !ok && len(code) >= 5 && code[:5] == "Digit" {
+		vk = uintptr(code[5])
+	} else if !ok && len(code) >= 2 && code[:2] == "VK" {
+		if n, err := strconv.ParseUint(code[2:], 10, 64); err == nil {
+			vk = uintptr(n)
+		}
+	}
+	if vk == 0 {
+		return
+	}
+	flag := uintptr(0)
+	if !down {
+		flag = 0x0002
+	}
+	_, _, _ = procKeybdWait.Call(vk, 0, flag, 0)
+}
+
+func doRightClick(x, y int32) {
+	ix, iy := uintptr(x), uintptr(y)
+	_, _, _ = procSetCursorPos.Call(ix, iy)
+	time.Sleep(30 * time.Millisecond)
+	_, _, _ = procMouseWait.Call(0x0008, ix, iy, 0, 0) // RIGHTDOWN
+	time.Sleep(50 * time.Millisecond)
+	_, _, _ = procMouseWait.Call(0x0010, ix, iy, 0, 0) // RIGHTUP
+}
+
+func doDrag(x1, y1, x2, y2 int32) {
+	ix1, iy1 := uintptr(x1), uintptr(y1)
+	ix2, iy2 := uintptr(x2), uintptr(y2)
+	_, _, _ = procSetCursorPos.Call(ix1, iy1)
+	time.Sleep(30 * time.Millisecond)
+	_, _, _ = procMouseWait.Call(0x0002, ix1, iy1, 0, 0) // LEFTDOWN
+	time.Sleep(30 * time.Millisecond)
+	_, _, _ = procSetCursorPos.Call(ix2, iy2) // move
+	time.Sleep(30 * time.Millisecond)
+	_, _, _ = procMouseWait.Call(0x0004, ix2, iy2, 0, 0) // LEFTUP
+}
 
 type RECT struct{ Left, Top, Right, Bottom int32 }
 
@@ -50,9 +116,18 @@ var upgrader = websocket.Upgrader{
 }
 
 type ctrlMsg struct {
-	Screen  *int `json:"screen,omitempty"`
-	Quality *int `json:"quality,omitempty"`
-	MaxW    *int `json:"maxw,omitempty"`
+	Screen  *int    `json:"screen,omitempty"`
+	Quality *int    `json:"quality,omitempty"`
+	MaxW    *int    `json:"maxw,omitempty"`
+	Key     *string `json:"key,omitempty"`
+	KeyDown *bool   `json:"down,omitempty"`
+	Text    *string `json:"text,omitempty"`
+	RX      *int    `json:"rx,omitempty"`
+	RY      *int    `json:"ry,omitempty"`
+	DX1     *int    `json:"dx1,omitempty"`
+	DY1     *int    `json:"dy1,omitempty"`
+	DX2     *int    `json:"dx2,omitempty"`
+	DY2     *int    `json:"dy2,omitempty"`
 }
 
 type statsMsg struct {
