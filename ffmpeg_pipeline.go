@@ -108,11 +108,11 @@ func startFFmpeg(id, quality, maxW int) (*ffSession, int, int) {
 		ffQ = 31
 	}
 
-	vf := "null"
+	vf := "format=yuv420p" // 色度半采样，带宽减半，画质几乎无损
 	if maxW > 0 && capW > maxW {
 		outH = capH * maxW / capW
 		outW = maxW
-		vf = fmt.Sprintf("scale=%d:%d:flags=fast_bilinear", outW, outH)
+		vf = fmt.Sprintf("scale=%d:%d:flags=fast_bilinear,format=yuv420p", outW, outH)
 	}
 
 	args := []string{
@@ -126,6 +126,7 @@ func startFFmpeg(id, quality, maxW int) (*ffSession, int, int) {
 		"-i", "desktop",
 		"-vf", vf,
 		"-c:v", "mjpeg", "-q:v", strconv.Itoa(ffQ),
+		"-huffman", "default", // 优化哈夫曼表，体积再减 5-10%
 		"-f", "image2pipe", "pipe:1",
 	}
 
