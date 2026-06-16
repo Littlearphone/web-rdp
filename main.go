@@ -186,7 +186,7 @@ func main() {
 		if err != nil {
 			return
 		}
-		handleWS(conn)
+		handleWS(conn, r)
 	})
 
 	http.HandleFunc("/click", func(w http.ResponseWriter, r *http.Request) {

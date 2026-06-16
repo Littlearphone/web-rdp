@@ -72,7 +72,7 @@
     <span class="sep desktop-only">|</span><input type="checkbox" id="enable-control"><label for="enable-control" class="desktop-only" id="enable-control-label">控制</label>
     <span class="sep desktop-only">|</span>
     <span id="stats">等待...</span>
-    <span style="margin-left:auto;" class="desktop-only"><span id="status-text" style="color:#f1c40f;">连接中...</span></span>
+    <span style="margin-left:auto;" class="desktop-only"><span id="user-name" style="color:#888;margin-right:8px;"></span><span id="status-text" style="color:#f1c40f;">连接中...</span></span>
   </div>
   <div id="view"><img id="screen" src="" alt="等待画面信号..."></div>
 </div>
@@ -85,7 +85,7 @@
   const maxwSelect = document.getElementById('maxw'), statsEl = document.getElementById('stats')
   const reconnectHint = document.getElementById('reconnect-hint'), reconnectMsg = document.getElementById('reconnect-msg')
   const bar = document.getElementById('bar')
-  const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
+  const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) && window.innerWidth <= 900
 
   let meta = { ox: 0, oy: 0, pw: 1, ph: 1, zoom: 1.0 }
   let serverAddr = window.location.host
@@ -103,7 +103,7 @@
     ws.onopen = () => { wasConnected = true; statusEl.textContent = '已连接'; statusEl.style.color = '#27ae60'; reconnectDelay = 5; sendSettings() }
     ws.onmessage = (event) => {
       if (typeof event.data === 'string') {
-        try { const s = JSON.parse(event.data); if (isMobile) { const p = matchMedia('(orientation: portrait)').matches; statsEl.innerHTML = p ? `&emsp;${s.fps}fps&emsp;&emsp;${s.kb}KB&emsp;` : `${s.fps}fps<br>${s.kb}KB` } else { statsEl.innerHTML = `${s.w}×${s.h} Q${s.q} │ ${s.fps}fps │ ${s.enc_ms}ms │ ${s.kb}KB/f │ ${(s.kb*s.fps/1024).toFixed(1)}MB/s` }; if (s.screens > 0 && s.screens !== screenCount) { screenCount = s.screens; isMobile ? updateMobileUI() : updateDesktopScreens() } } catch (_) {}
+        try { const s = JSON.parse(event.data); if (s.user) { document.getElementById('user-name').textContent = s.user; statsEl.setAttribute('data-user', s.user); return }; if (isMobile) { const u = statsEl.getAttribute('data-user') || ''; const p = matchMedia('(orientation: portrait)').matches; statsEl.innerHTML = p ? `${u}&emsp;${s.fps}fps&emsp;&emsp;${s.kb}KB` : `${u}<br>${s.fps}fps<br>${s.kb}KB` } else { statsEl.innerHTML = `${s.w}×${s.h} Q${s.q} │ ${s.fps}fps │ ${s.enc_ms}ms │ ${s.kb}KB/f │ ${(s.kb*s.fps/1024).toFixed(1)}MB/s` }; if (s.screens > 0 && s.screens !== screenCount) { screenCount = s.screens; isMobile ? updateMobileUI() : updateDesktopScreens() } } catch (_) {}
         return
       }
       const buf = event.data, dv = new DataView(buf)

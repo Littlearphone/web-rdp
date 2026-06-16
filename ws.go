@@ -3,11 +3,15 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/jpeg"
 	"log"
 	"math"
+	"net/http"
 	"strconv"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -15,14 +19,42 @@ import (
 	"github.com/kbinani/screenshot"
 )
 
-func handleWS(conn *websocket.Conn) {
+var (
+	userCounter atomic.Int32
+	userMap     = make(map[string]string)
+	userMapMu   sync.Mutex
+)
+
+func userNameFor(ip string) string {
+	userMapMu.Lock()
+	defer userMapMu.Unlock()
+	if name, ok := userMap[ip]; ok {
+		return name
+	}
+	name := fmt.Sprintf("用户%d", userCounter.Add(1))
+	userMap[ip] = name
+	return name
+}
+
+func handleWS(conn *websocket.Conn, r *http.Request) {
 	var ff *ffSession
+	var curScreen int = -1
+	ip := r.RemoteAddr
+	if idx := strings.LastIndex(ip, ":"); idx != -1 {
+		ip = ip[:idx]
+	} // 去端口
+	userName := userNameFor(ip)
 	defer func() {
 		if ff != nil {
-			ff.stop()
+			releaseFFmpeg(curScreen)
 		}
 		_ = conn.Close()
 	}()
+
+	// 发送用户名
+	if b, _ := json.Marshal(map[string]string{"user": userName}); b != nil {
+		_ = conn.WriteMessage(websocket.TextMessage, b)
+	}
 
 	var currentID atomic.Int32
 	var currentQuality atomic.Int32
@@ -114,20 +146,19 @@ func handleWS(conn *websocket.Conn) {
 		if useFFmpeg {
 			if ff == nil || ffScreen != id || ffQ != q || ffMW != mw {
 				if ff != nil {
-					ff.stop()
+					releaseFFmpeg(curScreen)
 				}
-				var outW, outH int
-				ff, outW, outH = startFFmpeg(id, q, mw)
+				ff = acquireFFmpeg(id, q, mw)
+				curScreen = id
 				if ff == nil {
 					log.Printf("ffmpeg 启动失败")
 					time.Sleep(time.Second)
 					continue
 				}
 				ffScreen = id
+				curScreen = id
 				ffQ = q
 				ffMW = mw
-				_ = outW
-				_ = outH
 			}
 
 			var jpg []byte
@@ -136,15 +167,17 @@ func handleWS(conn *websocket.Conn) {
 				if jpg == nil {
 					ff = nil
 					ffScreen = -1
+					curScreen = -1
 					continue
 				}
 			case <-readErr:
 				return
 			case <-time.After(5 * time.Second):
 				log.Printf("ffmpeg 5 秒无帧，重启")
-				ff.stop()
+				releaseFFmpeg(curScreen)
 				ff = nil
 				ffScreen = -1
+				curScreen = -1
 				continue
 			}
 

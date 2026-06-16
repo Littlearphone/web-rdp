@@ -6,11 +6,57 @@ import (
 	"log"
 	"os/exec"
 	"strconv"
+	"sync"
 
 	"github.com/kbinani/screenshot"
 )
 
-// ── ffmpeg 管线 ──
+// ── ffmpeg 管线（按屏幕 ID 共享，引用计数）──
+
+var (
+	ffPool   = make(map[int]*ffSession)
+	ffRefs   = make(map[int]int)
+	ffPoolQ  = make(map[int]int)
+	ffPoolMW = make(map[int]int)
+	ffPoolMu sync.Mutex
+)
+
+func acquireFFmpeg(id, quality, maxW int) *ffSession {
+	ffPoolMu.Lock()
+	defer ffPoolMu.Unlock()
+	s, ok := ffPool[id]
+	if ok && ffPoolQ[id] == quality && ffPoolMW[id] == maxW {
+		ffRefs[id]++
+		return s
+	}
+	// 参数变了或无缓存 → 重建
+	if ok {
+		s.stop()
+		delete(ffPool, id)
+		delete(ffRefs, id)
+	}
+	s, _, _ = startFFmpeg(id, quality, maxW)
+	if s != nil {
+		ffPool[id] = s
+		ffRefs[id] = 1
+		ffPoolQ[id] = quality
+		ffPoolMW[id] = maxW
+	}
+	return s
+}
+
+func releaseFFmpeg(id int) {
+	ffPoolMu.Lock()
+	defer ffPoolMu.Unlock()
+	ffRefs[id]--
+	if ffRefs[id] <= 0 {
+		if s, ok := ffPool[id]; ok {
+			s.stop()
+			delete(ffPool, id)
+			delete(ffRefs, id)
+		}
+	}
+}
 
 type ffSession struct {
 	cmd     *exec.Cmd
