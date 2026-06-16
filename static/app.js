@@ -1,5 +1,7 @@
 // ── DOM 引用 ──
-const img = document.getElementById('screen');
+const canvas = document.getElementById('screen');
+const ctx = canvas.getContext('2d');
+let cw = 0, ch = 0;
 const select = document.getElementById('screen-id');
 const statusEl = document.getElementById('status-text');
 const controlCheck = document.getElementById('enable-control');
@@ -151,7 +153,7 @@ function onMessage(event) {
         controlCheck.disabled = !isMe && s.owner !== '';
         controlCheck.checked = isMe;
         controlCheck.parentElement.title = s.owner ? `控制权: ${s.owner}` : '点击获取控制权';
-        img.style.cursor = 'crosshair';
+        canvas.style.cursor = 'crosshair';
       }
 
       // 屏幕数量变化
@@ -195,21 +197,24 @@ function onMessage(event) {
     }
   }
 
-  // 渲染 JPEG
+  // Canvas 渲染（createImageBitmap 异步解码，不阻塞主线程）
   const jpg = new Uint8Array(buf, 24);
-  const blob = new Blob([jpg], { type: 'image/jpeg' });
-  const url = URL.createObjectURL(blob);
-  const old = img.src;
-  img.src = url;
-  if (old && old.startsWith('blob:')) URL.revokeObjectURL(old);
+  createImageBitmap(new Blob([jpg], { type: 'image/jpeg' })).then(bmp => {
+    if (cw !== meta.pw || ch !== meta.ph) {
+      canvas.width = meta.pw;
+      canvas.height = meta.ph;
+      cw = meta.pw;
+      ch = meta.ph;
+    }
+    ctx.drawImage(bmp, 0, 0);
+    bmp.close();
+  }).catch(() => {});
 }
 
 connect();
 
 // ── 自动重连 ──
-function startReconnect() {
-  scheduleReconnect();
-}
+function startReconnect() { scheduleReconnect(); }
 
 function scheduleReconnect() {
   clearReconnectTimer();
@@ -280,31 +285,21 @@ if (!isMobile) {
   }
 
   qualitySlider.oninput = () => { qualityVal.textContent = qualitySlider.value; };
-  qualitySlider.onchange = () => {
-    currentQ = parseInt(qualitySlider.value);
-    sendSettings();
-  };
-  maxwSelect.onchange = () => {
-    currentMW = parseInt(maxwSelect.value);
-    sendSettings();
-  };
-  select.onchange = () => {
-    currentScreen = parseInt(select.value);
-    send({ screen: currentScreen });
-    lastResKey = '';
-  };
+  qualitySlider.onchange = () => { currentQ = parseInt(qualitySlider.value); sendSettings(); };
+  maxwSelect.onchange = () => { currentMW = parseInt(maxwSelect.value); sendSettings(); };
+  select.onchange = () => { currentScreen = parseInt(select.value); send({ screen: currentScreen }); lastResKey = ''; };
 
-  // 控制权切换
+  // 控制权
   controlCheck.onchange = () => {
     send({ control: controlCheck.checked });
-    img.style.cursor = 'crosshair';
+    canvas.style.cursor = 'crosshair';
   };
 
   // 鼠标点击 / 拖拽
   let active = false, dragStart = null, dragging = false;
 
-  img.onmousedown = e => {
-    if (!controlCheck.checked || e.target !== img) return;
+  canvas.onmousedown = e => {
+    if (!controlCheck.checked || e.target !== canvas) return;
     e.preventDefault();
     if (e.button === 0) {
       active = true;
@@ -315,7 +310,7 @@ if (!isMobile) {
     }
   };
 
-  img.onmousemove = e => {
+  canvas.onmousemove = e => {
     if (!active || !dragStart) return;
     const c = screenCoords(e);
     if (c.fx == null) return;
@@ -324,17 +319,14 @@ if (!isMobile) {
     }
   };
 
-  img.onmouseup = e => {
+  canvas.onmouseup = e => {
     if (!active) return;
     active = false;
     e.preventDefault();
     const c = screenCoords(e);
     if (c.fx == null) return;
     if (dragging) {
-      send({
-        dx1: dragStart.fx, dy1: dragStart.fy,
-        dx2: c.fx, dy2: c.fy
-      });
+      send({ dx1: dragStart.fx, dy1: dragStart.fy, dx2: c.fx, dy2: c.fy });
     } else {
       fetch(`http://${serverAddr}/click?x=${c.fx}&y=${c.fy}`).catch(() => {});
     }
@@ -344,7 +336,7 @@ if (!isMobile) {
 
   // 右键
   view.addEventListener('contextmenu', e => {
-    if (!controlCheck.checked || e.target !== img) return;
+    if (!controlCheck.checked || e.target !== canvas) return;
     e.preventDefault();
     const c = screenCoords(e);
     if (c.fx == null) return;
@@ -354,23 +346,20 @@ if (!isMobile) {
   // 键盘
   const preventCodes = new Set([
     'F1', 'F3', 'F5', 'F11', 'F12', 'Tab', 'Escape',
-    'AltLeft', 'AltRight', 'ControlLeft', 'ControlRight',
-    'MetaLeft', 'MetaRight'
+    'AltLeft', 'AltRight', 'ControlLeft', 'ControlRight', 'MetaLeft', 'MetaRight'
   ]);
 
   window.addEventListener('keydown', e => {
     if (!controlCheck.checked) return;
     if (preventCodes.has(e.code) || e.ctrlKey || e.altKey || e.metaKey) {
-      e.preventDefault();
-      e.stopPropagation();
+      e.preventDefault(); e.stopPropagation();
     }
     sendKey(e.code, true);
   }, { capture: true });
 
   window.addEventListener('keyup', e => {
     if (!controlCheck.checked) return;
-    e.preventDefault();
-    e.stopPropagation();
+    e.preventDefault(); e.stopPropagation();
     sendKey(e.code, false);
   }, { capture: true });
 }
@@ -388,7 +377,6 @@ if (isMobile) {
   }
 
   function updateMobileUI() {
-    // 轻量更新：只切换 active class
     if (mobileUIBuilt) {
       bar.querySelectorAll('.ctrl-btn').forEach(b => b.classList.remove('active'));
       bar.querySelector(`[data-q="${currentQ}"]`)?.classList.add('active');
@@ -398,7 +386,6 @@ if (isMobile) {
       return;
     }
 
-    // 首次构建 DOM
     mobileUIBuilt = true;
     bar.querySelectorAll('.ctrl-rows,.ctrl-row,.ctrl-btn,.ctrl-group').forEach(e => e.remove());
 
@@ -409,12 +396,7 @@ if (isMobile) {
       bar.appendChild(rows);
     }
 
-    const row = () => {
-      const d = document.createElement('div');
-      d.className = 'ctrl-row';
-      rows.appendChild(d);
-      return d;
-    };
+    const row = () => { const d = document.createElement('div'); d.className = 'ctrl-row'; rows.appendChild(d); return d; };
 
     const addBtn = (r, text, cls, click) => {
       const b = document.createElement('span');
@@ -433,9 +415,7 @@ if (isMobile) {
         if (b.active) el.classList.add('active');
         el.textContent = b.label;
         el.onclick = b.click;
-        if (b.data) {
-          Object.entries(b.data).forEach(([k, v]) => el.setAttribute('data-' + k, v));
-        }
+        if (b.data) Object.entries(b.data).forEach(([k, v]) => el.setAttribute('data-' + k, v));
         g.appendChild(el);
       });
       r.appendChild(g);
@@ -443,7 +423,6 @@ if (isMobile) {
 
     const r = row();
 
-    // 屏幕切换
     addBtn(r, screenCount > 1 ? `屏${currentScreen}` : '主屏', 'scr-btn', () => {
       if (screenCount > 1) {
         currentScreen = (currentScreen + 1) % screenCount;
@@ -453,18 +432,14 @@ if (isMobile) {
       }
     });
 
-    // 画质
     addGroup(r, [
       { label: '低', active: currentQ === 40, data: { q: 40 }, click: () => { currentQ = 40; sendSettings(); updateMobileUI(); } },
       { label: '中', active: currentQ === 60, data: { q: 60 }, click: () => { currentQ = 60; sendSettings(); updateMobileUI(); } },
       { label: '高', active: currentQ === 80, data: { q: 80 }, click: () => { currentQ = 80; sendSettings(); updateMobileUI(); } },
     ]);
 
-    // 分辨率
     addGroup(r, mobileResOpts.map(o => ({
-      label: o.label,
-      active: currentMW === o.w,
-      data: { mw: o.w },
+      label: o.label, active: currentMW === o.w, data: { mw: o.w },
       click: () => { currentMW = o.w; sendSettings(); updateMobileUI(); }
     })));
   }
@@ -479,7 +454,7 @@ function eventPos(e) {
 
 function screenCoords(e) {
   const p = eventPos(e);
-  const rect = img.getBoundingClientRect();
+  const rect = canvas.getBoundingClientRect();
   const ratio = meta.pw / meta.ph;
   const cRatio = rect.width / rect.height;
 
