@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Web远程控制</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="main">
+  <div id="bar">
+    <span class="desktop-only">屏幕</span>
+    <select id="screen-id"><option value="0">主屏</option></select>
+    <span class="sep desktop-only">|</span>
+    <span class="desktop-only">画质</span>
+    <input type="range" id="quality" min="30" max="100" value="75" step="5">
+    <span id="quality-val" class="desktop-only">75</span>
+    <span class="sep desktop-only">|</span>
+    <span class="desktop-only">分辨率</span>
+    <select id="maxw"><option value="0">原始</option></select>
+    <span class="sep desktop-only">|</span>
+    <input type="checkbox" id="enable-control">
+    <label for="enable-control" class="desktop-only" id="enable-control-label">控制</label>
+    <span class="sep desktop-only">|</span>
+    <span id="stats">等待...</span>
+    <span style="margin-left:auto;" class="desktop-only">
+      <span id="status-text" style="color:#f1c40f;">连接中...</span>
+    </span>
+  </div>
+  <div id="view">
+    <img id="screen" src="" alt="等待画面信号...">
+  </div>
+</div>
+<div id="reconnect-hint">
+  <span id="reconnect-msg"></span>
+  <button onclick="manualReconnect()">立即重连</button>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

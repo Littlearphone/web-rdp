@@ -1,9 +1,10 @@
 package main
 
 import (
-	_ "embed"
+	"embed"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"net/url"
@@ -16,8 +17,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-//go:embed views/index.html
-var indexHTML string
+//go:embed static
+var staticFS embed.FS
 
 var httpClient *http.Client
 
@@ -193,14 +194,8 @@ func main() {
 		detectFFmpeg()
 	}
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(indexHTML))
-	})
+	sub, _ := fs.Sub(staticFS, "static")
+	http.Handle("/", http.FileServer(http.FS(sub)))
 
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
