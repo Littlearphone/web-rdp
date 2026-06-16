@@ -90,6 +90,13 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				if cm.RX != nil && cm.RY != nil {
 					doRightClick(int32(*cm.RX), int32(*cm.RY))
 				}
+				if cm.Control != nil {
+					if *cm.Control {
+						acquireControl(userName)
+					} else {
+						releaseControl(userName)
+					}
+				}
 				if cm.DX1 != nil {
 					doDrag(int32(*cm.DX1), int32(*cm.DY1), int32(*cm.DX2), int32(*cm.DY2))
 				}
@@ -216,10 +223,10 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				fps := float64(frames) / elapsed.Seconds()
 				maxW := float64(maxWait.Microseconds()) / 1000
 				stat := statsMsg{
-					FPS:     math.Round(fps*10) / 10,
-					EncMs:   math.Round(maxW*10) / 10,
-					KB:      math.Round(float64(len(msg))/102.4) / 10,
-					Screens: screenshot.NumActiveDisplays(), Q: q, W: cachedBounds.Dx(), H: cachedBounds.Dy(),
+					FPS:   math.Round(fps*10) / 10,
+					EncMs: math.Round(maxW*10) / 10,
+					KB:    math.Round(float64(len(msg))/102.4) / 10,
+					Owner: controlOwner, Screens: screenshot.NumActiveDisplays(), Q: q, W: cachedBounds.Dx(), H: cachedBounds.Dy(),
 				}
 				if b, _ := json.Marshal(stat); b != nil {
 					select {
@@ -278,10 +285,10 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			fps := float64(frames) / elapsed.Seconds()
 			maxW := float64(maxWait.Microseconds()) / 1000
 			stat := statsMsg{
-				FPS:     math.Round(fps*10) / 10,
-				EncMs:   math.Round(maxW*10) / 10,
-				KB:      math.Round(float64(len(msg))/102.4) / 10,
-				Screens: screenshot.NumActiveDisplays(), Q: q, W: cachedBounds.Dx(), H: cachedBounds.Dy(),
+				FPS:   math.Round(fps*10) / 10,
+				EncMs: math.Round(maxW*10) / 10,
+				KB:    math.Round(float64(len(msg))/102.4) / 10,
+				Owner: controlOwner, Screens: screenshot.NumActiveDisplays(), Q: q, W: cachedBounds.Dx(), H: cachedBounds.Dy(),
 			}
 			if b, _ := json.Marshal(stat); b != nil {
 				select {

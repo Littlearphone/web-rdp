@@ -103,7 +103,7 @@
     ws.onopen = () => { wasConnected = true; statusEl.textContent = '已连接'; statusEl.style.color = '#27ae60'; reconnectDelay = 5; sendSettings() }
     ws.onmessage = (event) => {
       if (typeof event.data === 'string') {
-        try { const s = JSON.parse(event.data); if (s.user) { document.getElementById('user-name').textContent = s.user; statsEl.setAttribute('data-user', s.user); return }; if (isMobile) { const u = statsEl.getAttribute('data-user') || ''; const p = matchMedia('(orientation: portrait)').matches; statsEl.innerHTML = p ? `${u}&emsp;${s.fps}fps&emsp;&emsp;${s.kb}KB` : `${u}<br>${s.fps}fps<br>${s.kb}KB` } else { statsEl.innerHTML = `${s.w}×${s.h} Q${s.q} │ ${s.fps}fps │ ${s.enc_ms}ms │ ${s.kb}KB/f │ ${(s.kb*s.fps/1024).toFixed(1)}MB/s` }; if (s.screens > 0 && s.screens !== screenCount) { screenCount = s.screens; isMobile ? updateMobileUI() : updateDesktopScreens() } } catch (_) {}
+        try { const s = JSON.parse(event.data); if (s.user) { document.getElementById('user-name').textContent = s.user; statsEl.setAttribute('data-user', s.user); return }; if (s.owner !== undefined) { const me = statsEl.getAttribute('data-user') || ''; const isMe = s.owner === me; console.log('control sync', {owner: s.owner, me, isMe}); controlCheck.disabled = !isMe && s.owner !== ''; controlCheck.checked = isMe; controlCheck.parentElement.title = s.owner ? `控制权: ${s.owner}` : '点击获取控制权'; if (isMe) img.style.cursor = 'none'; else img.style.cursor = 'crosshair' }; if (isMobile) { const u = statsEl.getAttribute('data-user') || ''; const p = matchMedia('(orientation: portrait)').matches; statsEl.innerHTML = p ? `${u}&emsp;${s.fps}fps&emsp;&emsp;${s.kb}KB` : `${u}<br>${s.fps}fps<br>${s.kb}KB` } else { statsEl.innerHTML = `${s.w}×${s.h} Q${s.q} │ ${s.fps}fps │ ${s.enc_ms}ms │ ${s.kb}KB/f │ ${(s.kb*s.fps/1024).toFixed(1)}MB/s` }; if (s.screens > 0 && s.screens !== screenCount) { screenCount = s.screens; isMobile ? updateMobileUI() : updateDesktopScreens() } } catch (_) {}
         return
       }
       const buf = event.data, dv = new DataView(buf)
@@ -176,7 +176,7 @@
 
   // ── 桌面控制功能 ──
   if (!isMobile) {
-    controlCheck.onchange = () => { img.style.cursor = controlCheck.checked ? 'none' : 'crosshair' }
+    controlCheck.onchange = () => { send({ control: controlCheck.checked }); img.style.cursor = controlCheck.checked ? 'none' : 'crosshair' }
     let active = false, dragStart = null, dragging = false
     img.onmousedown = (e) => { if (!controlCheck.checked || e.target !== img) return; e.preventDefault(); if (e.button === 0) { active = true; const c = screenCoords(e); if (c.fx == null) return; dragStart = c; dragging = false } }
     img.onmousemove = (e) => { if (!active || !dragStart) return; const c = screenCoords(e); if (c.fx == null) return; if (Math.abs(c.fx - dragStart.fx) > 3 || Math.abs(c.fy - dragStart.fy) > 3) dragging = true }

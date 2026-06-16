@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -36,6 +37,8 @@ func initHTTPClient(proxy string) {
 }
 
 var (
+	controlOwner            string
+	controlMu               sync.Mutex
 	user32                  = syscall.NewLazyDLL("user32.dll")
 	procSetCursorPos        = user32.NewProc("SetCursorPos")
 	procMouseWait           = user32.NewProc("mouse_event")
@@ -97,6 +100,22 @@ func doRightClick(x, y int32) {
 	_, _, _ = procMouseWait.Call(0x0010, ix, iy, 0, 0) // RIGHTUP
 }
 
+func acquireControl(user string) bool {
+	controlMu.Lock()
+	defer controlMu.Unlock()
+	if controlOwner == "" || controlOwner == user {
+		controlOwner = user
+		return true
+	}
+	return false
+}
+func releaseControl(user string) {
+	controlMu.Lock()
+	defer controlMu.Unlock()
+	if controlOwner == user {
+		controlOwner = ""
+	}
+}
 func doDrag(x1, y1, x2, y2 int32) {
 	ix1, iy1 := uintptr(x1), uintptr(y1)
 	ix2, iy2 := uintptr(x2), uintptr(y2)
@@ -116,6 +135,7 @@ var upgrader = websocket.Upgrader{
 }
 
 type ctrlMsg struct {
+	Control *bool   `json:"control,omitempty"`
 	Screen  *int    `json:"screen,omitempty"`
 	Quality *int    `json:"quality,omitempty"`
 	MaxW    *int    `json:"maxw,omitempty"`
@@ -131,6 +151,7 @@ type ctrlMsg struct {
 }
 
 type statsMsg struct {
+	Owner   string  `json:"owner"`
 	FPS     float64 `json:"fps"`
 	EncMs   float64 `json:"enc_ms"`
 	KB      float64 `json:"kb"`
