@@ -310,8 +310,20 @@ if (!isMobile) {
     }
   };
 
+  // 节流鼠标移动 → 远程 hover
+  let lastMoveSent = 0;
   canvas.onmousemove = e => {
-    if (!active || !dragStart) return;
+    if (!controlCheck.checked) return;
+    if (!active || !dragStart) {
+      // 非拖拽模式：每 30ms 发一次位置
+      const now = Date.now();
+      if (now - lastMoveSent < 30) return;
+      lastMoveSent = now;
+      const c = screenCoords(e);
+      if (c.fx != null) send({ mx: c.fx, my: c.fy });
+      return;
+    }
+    // 拖拽模式：检测是否超过阈值
     const c = screenCoords(e);
     if (c.fx == null) return;
     if (Math.abs(c.fx - dragStart.fx) > 3 || Math.abs(c.fy - dragStart.fy) > 3) {

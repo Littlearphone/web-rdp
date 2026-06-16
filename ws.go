@@ -97,6 +97,9 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 						releaseControl(userName)
 					}
 				}
+				if cm.MX != nil && cm.MY != nil {
+					_, _, _ = procSetCursorPos.Call(uintptr(*cm.MX), uintptr(*cm.MY))
+				}
 				if cm.DX1 != nil {
 					doDrag(int32(*cm.DX1), int32(*cm.DY1), int32(*cm.DX2), int32(*cm.DY2))
 				}

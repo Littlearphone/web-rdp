@@ -149,6 +149,8 @@ type ctrlMsg struct {
 	DY1     *int    `json:"dy1,omitempty"`
 	DX2     *int    `json:"dx2,omitempty"`
 	DY2     *int    `json:"dy2,omitempty"`
+	MX      *int    `json:"mx,omitempty"`
+	MY      *int    `json:"my,omitempty"`
 }
 
 type statsMsg struct {
