@@ -3,7 +3,7 @@ body { width: 100vw; height: 100vh; background: #000; color: #ddd; font-family: 
 
 #main { display: flex; flex-direction: column; height: 100%; }
 #view { flex: 1; display: flex; align-items: center; justify-content: center; overflow: hidden; }
-#screen { max-width: 100%; max-height: 100%; object-fit: contain; cursor: crosshair; }
+#screen { max-width: 100%; max-height: 100%; object-fit: contain; cursor: crosshair; image-rendering: auto; }
 #reconnect-hint { display: none; position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #1a1a1a; border: 1px solid #f1c40f; border-radius: 6px; padding: 10px 20px; color: #f1c40f; font-size: 13px; z-index: 100; white-space: nowrap; gap: 12px; align-items: center; }
 #reconnect-hint button { background: #f1c40f; color: #000; border: none; border-radius: 3px; padding: 4px 14px; cursor: pointer; font-weight: 600; font-size: 12px; }
 

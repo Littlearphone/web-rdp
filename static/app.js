@@ -151,7 +151,7 @@ function onMessage(event) {
         controlCheck.disabled = !isMe && s.owner !== '';
         controlCheck.checked = isMe;
         controlCheck.parentElement.title = s.owner ? `控制权: ${s.owner}` : '点击获取控制权';
-        img.style.cursor = isMe ? 'none' : 'crosshair';
+        img.style.cursor = 'crosshair';
       }
 
       // 屏幕数量变化
@@ -297,7 +297,7 @@ if (!isMobile) {
   // 控制权切换
   controlCheck.onchange = () => {
     send({ control: controlCheck.checked });
-    img.style.cursor = controlCheck.checked ? 'none' : 'crosshair';
+    img.style.cursor = 'crosshair';
   };
 
   // 鼠标点击 / 拖拽
