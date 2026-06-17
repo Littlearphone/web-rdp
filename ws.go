@@ -38,6 +38,7 @@ func userNameFor(ip string) string {
 
 func handleWS(conn *websocket.Conn, r *http.Request) {
 	var ff *ffSession
+	webcodecsOK := true
 	var curScreen int = -1
 	ip := r.RemoteAddr
 	if idx := strings.LastIndex(ip, ":"); idx != -1 {
@@ -93,6 +94,9 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				}
 				if cm.MX != nil && cm.MY != nil {
 					_, _, _ = procSetCursorPos.Call(uintptr(*cm.MX), uintptr(*cm.MY))
+				}
+				if cm.Webcodecs != nil {
+					webcodecsOK = *cm.Webcodecs
 				}
 				if cm.Control != nil {
 					if *cm.Control {
@@ -209,7 +213,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				cacheFrame = 30
 			}
 			cacheFrame--
-			if h264Encoder == "" {
+			if h264Encoder == "" || !webcodecsOK {
 				data = encodeFrame(int32(cachedBounds.Min.X), int32(cachedBounds.Min.Y), int32(cachedBounds.Dx()), int32(cachedBounds.Dy()), cachedZoom, data)
 			}
 			select {

@@ -12,10 +12,10 @@ const useWebCodecs = typeof VideoDecoder !== 'undefined';
 let meta = { ox:0, oy:0, pw:1, ph:1, zoom:1.0 }, serverAddr = window.location.host;
 let ws=null, reconnectTimer=null, reconnectDelay=5, reconnectCountdown=0, wasConnected=false, lastResKey='';
 let currentQ=75, currentMW=0, currentScreen=0, screenCount=1, mobileResOpts=[], mobileUIBuilt=false;
-let streamFormat = 'jpeg';
+let streamFormat = 'jpeg', useH264Pref = false;
 
 function send(o) { if(ws&&ws.readyState===WebSocket.OPEN) ws.send(JSON.stringify(o)); }
-function sendSettings() { send({quality:currentQ, maxw:currentMW}); }
+function sendSettings() { send({quality:currentQ, maxw:currentMW, webcodecs:useH264Pref}); }
 function sendKey(code,down) { send({key:code, down:down}); }
 
 // ── H.264 WebCodecs 解码器 ──
@@ -67,7 +67,7 @@ function buildResolutions(pw,ph) {
 function applyResolutions(pw,ph){let k=`${pw}x${ph}`;if(k===lastResKey)return;lastResKey=k;let o=buildResolutions(pw,ph),c=maxwSelect.value;maxwSelect.innerHTML='';o.forEach(o=>{let e=document.createElement('option');e.value=o.value||o.w;e.textContent=o.label;maxwSelect.appendChild(e);});maxwSelect.value=o.find(o=>String(o.value||o.w)===c)?c:String(o[0].value||o[0].w);if(isMobile)sendSettings();}
 
 // ── 连接 ──
-function connect(){if(ws){ws.onclose=null;ws.close();ws=null;}clearReconnectTimer();reconnectHint.style.display='none';lastResKey='';statusEl.textContent='连接中...';statusEl.style.color='#f1c40f';ws=new WebSocket(`ws://${serverAddr}/ws`);ws.binaryType='arraybuffer';ws.onopen=()=>{wasConnected=true;statusEl.textContent='已连接';statusEl.style.color='#27ae60';reconnectDelay=5;sendSettings();};ws.onmessage=onMessage;ws.onclose=()=>{statusEl.textContent='连接断开';statusEl.style.color='#e74c3c';statsEl.innerHTML='离线';if(h264Decoder){try{h264Decoder.close()}catch(_){};h264Decoder=null;h264Ready=false;}if(wasConnected)startReconnect();};ws.onerror=()=>{if(!wasConnected){statusEl.textContent='连接失败';statusEl.style.color='#e74c3c';}};}
+function connect(){if(ws){ws.onclose=null;ws.close();ws=null;}h264Buf=new Uint8Array(0);h264Ready=false;if(h264Decoder){try{h264Decoder.close()}catch(_){};h264Decoder=null;}clearReconnectTimer();reconnectHint.style.display='none';lastResKey='';statusEl.textContent='连接中...';statusEl.style.color='#f1c40f';ws=new WebSocket(`ws://${serverAddr}/ws`);ws.binaryType='arraybuffer';ws.onopen=()=>{wasConnected=true;statusEl.textContent='已连接';statusEl.style.color='#27ae60';reconnectDelay=5;sendSettings();};ws.onmessage=onMessage;ws.onclose=()=>{statusEl.textContent='连接断开';statusEl.style.color='#e74c3c';statsEl.innerHTML='离线';if(h264Decoder){try{h264Decoder.close()}catch(_){};h264Decoder=null;h264Ready=false;}h264Buf=new Uint8Array(0);if(wasConnected)startReconnect();};ws.onerror=()=>{if(!wasConnected){statusEl.textContent='连接失败';statusEl.style.color='#e74c3c';}};}
 
 function onMessage(event){
   if(typeof event.data==='string'){try{let s=JSON.parse(event.data);
@@ -109,6 +109,7 @@ if(!isMobile){
   function updateDesktopScreens(){let c=select.value;select.innerHTML='';for(let i=0;i<screenCount;i++){let e=document.createElement('option');e.value=i;e.textContent=i===0?'主屏 (0)':`副屏 (${i})`;select.appendChild(e);}select.value=c<screenCount?c:'0';}
   function buildDesktopResolutions(pw,ph){let o=buildResolutions(pw,ph),c=maxwSelect.value;maxwSelect.innerHTML='';o.forEach(o=>{let e=document.createElement('option');e.value=o.value;e.textContent=o.label;maxwSelect.appendChild(e);});maxwSelect.value=o.find(o=>String(o.value)===c)?c:'0';}
   qualitySlider.oninput=()=>{qualityVal.textContent=qualitySlider.value;};qualitySlider.onchange=()=>{currentQ=parseInt(qualitySlider.value);sendSettings();};maxwSelect.onchange=()=>{currentMW=parseInt(maxwSelect.value);sendSettings();};select.onchange=()=>{currentScreen=parseInt(select.value);send({screen:currentScreen});lastResKey='';};
+  let h264Toggle=document.getElementById('use-h264');if(h264Toggle){h264Toggle.checked=useH264Pref;h264Toggle.onchange=()=>{useH264Pref=h264Toggle.checked;sendSettings();setTimeout(connect,100);};}
   controlCheck.onchange=()=>{send({control:controlCheck.checked});canvas.style.cursor='crosshair';};
   let active=false,dragStart=null,dragging=false,lastMoveSent=0;
   canvas.onmousedown=e=>{if(!controlCheck.checked||e.target!==canvas)return;e.preventDefault();if(e.button===0){active=true;let c=screenCoords(e);if(c.fx==null)return;dragStart=c;dragging=false;}};
