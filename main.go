@@ -136,22 +136,21 @@ var upgrader = websocket.Upgrader{
 }
 
 type ctrlMsg struct {
-	Control   *bool   `json:"control,omitempty"`
-	Screen    *int    `json:"screen,omitempty"`
-	Quality   *int    `json:"quality,omitempty"`
-	MaxW      *int    `json:"maxw,omitempty"`
-	Key       *string `json:"key,omitempty"`
-	KeyDown   *bool   `json:"down,omitempty"`
-	Text      *string `json:"text,omitempty"`
-	RX        *int    `json:"rx,omitempty"`
-	RY        *int    `json:"ry,omitempty"`
-	DX1       *int    `json:"dx1,omitempty"`
-	DY1       *int    `json:"dy1,omitempty"`
-	DX2       *int    `json:"dx2,omitempty"`
-	DY2       *int    `json:"dy2,omitempty"`
-	MX        *int    `json:"mx,omitempty"`
-	MY        *int    `json:"my,omitempty"`
-	Webcodecs *bool   `json:"webcodecs,omitempty"`
+	Control *bool   `json:"control,omitempty"`
+	Screen  *int    `json:"screen,omitempty"`
+	Quality *int    `json:"quality,omitempty"`
+	MaxW    *int    `json:"maxw,omitempty"`
+	Key     *string `json:"key,omitempty"`
+	KeyDown *bool   `json:"down,omitempty"`
+	Text    *string `json:"text,omitempty"`
+	RX      *int    `json:"rx,omitempty"`
+	RY      *int    `json:"ry,omitempty"`
+	DX1     *int    `json:"dx1,omitempty"`
+	DY1     *int    `json:"dy1,omitempty"`
+	DX2     *int    `json:"dx2,omitempty"`
+	DY2     *int    `json:"dy2,omitempty"`
+	MX      *int    `json:"mx,omitempty"`
+	MY      *int    `json:"my,omitempty"`
 }
 
 type statsMsg struct {
