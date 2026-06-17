@@ -161,6 +161,9 @@ type statsMsg struct {
 	Q       int     `json:"q"`
 	W       int     `json:"w"`
 	H       int     `json:"h"`
+	Ox      int     `json:"ox"`
+	Oy      int     `json:"oy"`
+	Zoom    float64 `json:"zoom"`
 	Screens int     `json:"screens"`
 }
 
@@ -194,6 +197,7 @@ func main() {
 	initHTTPClient(proxy)
 	if ffmpegArg == "" {
 		detectFFmpeg()
+		detectH264Encoder()
 	}
 
 	sub, _ := fs.Sub(staticFS, "static")
