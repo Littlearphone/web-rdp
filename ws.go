@@ -44,6 +44,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 		ip = ip[:idx]
 	}
 	userName := userNameFor(ip)
+
 	defer func() {
 		if ff != nil {
 			releaseFFmpeg(curScreen)
@@ -51,7 +52,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 		_ = conn.Close()
 	}()
 
-	// 发送用户名 + 编码格式
+	// ── 发送用户名 + 编码格式 ──
 	format := "jpeg"
 	if h264Encoder != "" {
 		format = "h264"
@@ -60,6 +61,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 		_ = conn.WriteMessage(websocket.TextMessage, b)
 	}
 
+	// ── 控制消息接收 ──
 	var currentID, currentQuality, currentMaxW atomic.Int32
 	currentQuality.Store(75)
 
@@ -114,6 +116,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 		}
 	}()
 
+	// ── 帧处理 ──
 	var (
 		ffScreen     = -1
 		ffQ          = -1
@@ -131,6 +134,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 		statCh       = make(chan []byte, 1)
 	)
 
+	// 发送 goroutine（单写 WebSocket）
 	go func() {
 		for {
 			select {
@@ -151,6 +155,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 		q, mw := int(currentQuality.Load()), int(currentMaxW.Load())
 
 		if useFFmpeg {
+			// ── ffmpeg 路径 ──
 			if ff == nil || ffScreen != id || ffQ != q || ffMW != mw {
 				if ff != nil {
 					releaseFFmpeg(curScreen)
@@ -166,6 +171,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				ffQ = q
 				ffMW = mw
 			}
+
 			var data []byte
 			select {
 			case data = <-ff.frameCh:
@@ -185,6 +191,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				curScreen = -1
 				continue
 			}
+
 			now := time.Now()
 			if !lastFrame.IsZero() {
 				w := now.Sub(lastFrame)
@@ -194,14 +201,18 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				}
 			}
 			lastFrame = now
+
 			if cacheFrame <= 0 || ffScreen != id {
 				cachedBounds = screenshot.GetDisplayBounds(id)
 				cachedZoom = getScreenZoom(id)
 				cacheFrame = 30
 			}
 			cacheFrame--
+
+			// MJPEG 需要 24B 头，H.264 裸发
 			if h264Encoder == "" {
-				data = encodeFrame(int32(cachedBounds.Min.X), int32(cachedBounds.Min.Y), int32(cachedBounds.Dx()), int32(cachedBounds.Dy()), cachedZoom, data)
+				data = encodeFrame(int32(cachedBounds.Min.X), int32(cachedBounds.Min.Y),
+					int32(cachedBounds.Dx()), int32(cachedBounds.Dy()), cachedZoom, data)
 			}
 			select {
 			case sendCh <- data:
@@ -209,11 +220,18 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				{
 				}
 			}
+
 			frames++
 			if elapsed := time.Since(lastStats); elapsed >= time.Second {
 				fps := float64(frames) / elapsed.Seconds()
 				maxW := float64(maxWait.Microseconds()) / 1000
-				stat := statsMsg{FPS: math.Round(fps*10) / 10, EncMs: math.Round(maxW*10) / 10, KB: math.Round(float64(len(data))/102.4) / 10, Owner: controlOwner, Ox: cachedBounds.Min.X, Oy: cachedBounds.Min.Y, Zoom: cachedZoom, Q: q, W: cachedBounds.Dx(), H: cachedBounds.Dy(), Screens: screenshot.NumActiveDisplays()}
+				stat := statsMsg{
+					FPS: math.Round(fps*10) / 10, EncMs: math.Round(maxW*10) / 10,
+					KB: math.Round(float64(len(data))/102.4) / 10, Owner: controlOwner,
+					Ox: cachedBounds.Min.X, Oy: cachedBounds.Min.Y, Zoom: cachedZoom,
+					Q: q, W: cachedBounds.Dx(), H: cachedBounds.Dy(),
+					Screens: screenshot.NumActiveDisplays(),
+				}
 				if b, _ := json.Marshal(stat); b != nil {
 					select {
 					case statCh <- b:
@@ -226,7 +244,8 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			}
 			continue
 		}
-		// Go 回退
+
+		// ── 纯 Go 回退 ──
 		img, err := screenshot.CaptureDisplay(id)
 		if err != nil {
 			time.Sleep(100 * time.Millisecond)
@@ -241,13 +260,15 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 		img = downscale(img, mw)
 		goJpgBuf.Reset()
 		_ = jpeg.Encode(&goJpgBuf, img, &jpeg.Options{Quality: q})
-		msg := encodeFrame(int32(cachedBounds.Min.X), int32(cachedBounds.Min.Y), int32(cachedBounds.Dx()), int32(cachedBounds.Dy()), cachedZoom, goJpgBuf.Bytes())
+		msg := encodeFrame(int32(cachedBounds.Min.X), int32(cachedBounds.Min.Y),
+			int32(cachedBounds.Dx()), int32(cachedBounds.Dy()), cachedZoom, goJpgBuf.Bytes())
 		select {
 		case sendCh <- msg:
 		default:
 			{
 			}
 		}
+
 		now := time.Now()
 		if !lastFrame.IsZero() {
 			w := now.Sub(lastFrame)
@@ -257,11 +278,18 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			}
 		}
 		lastFrame = now
+
 		frames++
 		if elapsed := time.Since(lastStats); elapsed >= time.Second {
 			fps := float64(frames) / elapsed.Seconds()
 			maxW := float64(maxWait.Microseconds()) / 1000
-			stat := statsMsg{FPS: math.Round(fps*10) / 10, EncMs: math.Round(maxW*10) / 10, KB: math.Round(float64(len(msg))/102.4) / 10, Owner: controlOwner, Ox: cachedBounds.Min.X, Oy: cachedBounds.Min.Y, Zoom: cachedZoom, Q: q, W: cachedBounds.Dx(), H: cachedBounds.Dy(), Screens: screenshot.NumActiveDisplays()}
+			stat := statsMsg{
+				FPS: math.Round(fps*10) / 10, EncMs: math.Round(maxW*10) / 10,
+				KB: math.Round(float64(len(msg))/102.4) / 10, Owner: controlOwner,
+				Ox: cachedBounds.Min.X, Oy: cachedBounds.Min.Y, Zoom: cachedZoom,
+				Q: q, W: cachedBounds.Dx(), H: cachedBounds.Dy(),
+				Screens: screenshot.NumActiveDisplays(),
+			}
 			if b, _ := json.Marshal(stat); b != nil {
 				select {
 				case statCh <- b:
