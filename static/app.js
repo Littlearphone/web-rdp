@@ -71,9 +71,7 @@ function connect(){if(ws){ws.onclose=null;ws.close();ws=null;}clearReconnectTime
 
 function onMessage(event){
   if(typeof event.data==='string'){try{let s=JSON.parse(event.data);
-    if(s.reset){h264Ready=false;h264Buf=new Uint8Array(0);if(h264Decoder){try{h264Decoder.close()}catch(_){};h264Decoder=null;}return;}
     if(s.user){statsEl.setAttribute('data-user',s.user);if(s.format)streamFormat=s.format;return;}
-    if(s.ox!==undefined){if(meta.pw!==s.w||meta.ph!==s.h){if(h264Decoder){try{h264Decoder.close()}catch(_){};h264Decoder=null;h264Ready=false;}}meta.ox=s.ox;meta.oy=s.oy;meta.pw=s.w;meta.ph=s.h;meta.zoom=s.zoom;}
     if(isMobile){let u=statsEl.getAttribute('data-user')||'',p=matchMedia('(orientation:portrait)').matches;statsEl.innerHTML=p?`${u}&emsp;${s.fps}fps&emsp;${s.kb}KB`:`${u}<br>${s.fps}fps<br>${s.kb}KB`;}else{statsEl.innerHTML=`${s.w}×${s.h} Q${s.q} │ ${s.fps}fps │ ${s.enc_ms}ms │ ${s.kb}KB/f │ ${(s.kb*s.fps/1024).toFixed(1)}MB/s`;}
     if(s.owner!==undefined){let me=statsEl.getAttribute('data-user')||'',im=s.owner===me;controlCheck.disabled=!im&&s.owner!=='';controlCheck.checked=im;controlCheck.parentElement.title=s.owner?`控制权:${s.owner}`:'点击获取控制权';canvas.style.cursor='crosshair';}
     if(s.screens>0&&s.screens!==screenCount){screenCount=s.screens;isMobile?(mobileUIBuilt=false,updateMobileUI()):updateDesktopScreens();}
