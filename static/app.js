@@ -246,6 +246,8 @@ const JPEG = {
     createImageBitmap(new Blob([jpg], { type: 'image/jpeg' })).then(bmp => {
       if (cw !== bmp.width || ch !== bmp.height) { canvas.width = bmp.width; canvas.height = bmp.height; cw = bmp.width; ch = bmp.height; }
       ctx.drawImage(bmp, 0, 0); bmp.close();
+      // 首帧渲染后恢复状态（从 H.264 切回 MJPEG 时触发）
+      if (statusEl.textContent === '切换中...') { statusEl.textContent = '已连接'; statusEl.style.color = '#27ae60'; }
     }).catch(() => { });
   }
 };
