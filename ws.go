@@ -38,6 +38,7 @@ func userNameFor(ip string) string {
 
 func handleWS(conn *websocket.Conn, r *http.Request) {
 	var ff *ffSession
+	useH264 := false // 默认 MJPEG
 	var curScreen int = -1
 	ip := r.RemoteAddr
 	if idx := strings.LastIndex(ip, ":"); idx != -1 {
@@ -54,7 +55,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 
 	// ── 发送用户名 + 编码格式 ──
 	format := "jpeg"
-	if h264Encoder != "" {
+	if useH264 {
 		format = "h264"
 	}
 	if b, _ := json.Marshal(map[string]string{"user": userName, "format": format}); b != nil {
@@ -96,6 +97,9 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				if cm.MX != nil && cm.MY != nil {
 					_, _, _ = procSetCursorPos.Call(uintptr(*cm.MX), uintptr(*cm.MY))
 				}
+				if cm.Webcodecs != nil {
+					useH264 = *cm.Webcodecs && h264Encoder != ""
+				}
 				if cm.Control != nil {
 					if *cm.Control {
 						acquireControl(userName)
@@ -121,6 +125,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 		ffScreen     = -1
 		ffQ          = -1
 		ffMW         = -1
+		ffH264       = false
 		goJpgBuf     bytes.Buffer
 		frames       int
 		totalWait    time.Duration
@@ -156,11 +161,11 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 
 		if useFFmpeg {
 			// ── ffmpeg 路径 ──
-			if ff == nil || ffScreen != id || ffQ != q || ffMW != mw {
+			if ff == nil || ffScreen != id || ffQ != q || ffMW != mw || ffH264 != useH264 {
 				if ff != nil {
 					releaseFFmpeg(curScreen)
 				}
-				ff = acquireFFmpeg(id, q, mw)
+				ff = acquireFFmpeg(id, q, mw, useH264)
 				if ff == nil {
 					log.Printf("ffmpeg 启动失败")
 					time.Sleep(time.Second)
@@ -170,6 +175,20 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				curScreen = id
 				ffQ = q
 				ffMW = mw
+				ffH264 = useH264
+				cacheFrame = 0
+				f := "jpeg"
+				if ffH264 {
+					f = "h264"
+				}
+				if b, _ := json.Marshal(map[string]string{"format": f}); b != nil {
+					select {
+					case statCh <- b:
+					default:
+						{
+						}
+					}
+				}
 			}
 
 			var data []byte
@@ -210,7 +229,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			cacheFrame--
 
 			// MJPEG 需要 24B 头，H.264 裸发
-			if h264Encoder == "" {
+			if !useH264 {
 				data = encodeFrame(int32(cachedBounds.Min.X), int32(cachedBounds.Min.Y),
 					int32(cachedBounds.Dx()), int32(cachedBounds.Dy()), cachedZoom, data)
 			}

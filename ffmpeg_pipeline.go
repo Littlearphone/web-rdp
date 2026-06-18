@@ -37,7 +37,7 @@ func (f *ffSession) stop() {
 	}
 }
 
-func acquireFFmpeg(id, quality, maxW int) *ffSession {
+func acquireFFmpeg(id, quality, maxW int, h264 bool) *ffSession {
 	ffPoolMu.Lock()
 	defer ffPoolMu.Unlock()
 	s, ok := ffPool[id]
@@ -50,7 +50,7 @@ func acquireFFmpeg(id, quality, maxW int) *ffSession {
 		delete(ffPool, id)
 		delete(ffRefs, id)
 	}
-	s = startFFmpeg(id, quality, maxW)
+	s = startFFmpeg(id, quality, maxW, h264)
 	if s != nil {
 		ffPool[id] = s
 		ffRefs[id] = 1
@@ -75,7 +75,7 @@ func releaseFFmpeg(id int) {
 
 // ═══════════════════════ 启动（公共） ═══════════════════════
 
-func startFFmpeg(id, quality, maxW int) *ffSession {
+func startFFmpeg(id, quality, maxW int, h264 bool) *ffSession {
 	bounds := screenshot.GetDisplayBounds(id)
 	physW, physH := bounds.Dx(), bounds.Dy()
 
@@ -111,7 +111,7 @@ func startFFmpeg(id, quality, maxW int) *ffSession {
 	}
 
 	var args []string
-	if h264Encoder != "" {
+	if h264 {
 		args = h264Args(device, capX, capY, capW, capH, vf)
 	} else {
 		args = mjpegArgs(device, capX, capY, capW, capH, vf, ffQ)
@@ -136,7 +136,7 @@ func startFFmpeg(id, quality, maxW int) *ffSession {
 		stopCh:  make(chan struct{}),
 	}
 
-	if h264Encoder != "" {
+	if h264 {
 		go h264Reader(ff)
 	} else {
 		go mjpegReader(ff)
