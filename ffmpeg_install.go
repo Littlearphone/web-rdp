@@ -45,30 +45,55 @@ func tryNextH264Encoder() bool {
 
 // detectFFmpeg 自动检测系统中的 ffmpeg 可执行文件。
 // 优先级：本地目录 ffmpeg_local/ → PATH 环境变量 → 在线下载
+// 下载时优先选择支持 dxgigrab（DirectX 桌面捕获）的版本。
 func detectFFmpeg() {
 	local := filepath.Join(ffmpegLocalDir, "bin", "ffmpeg.exe")
+
+	// 1) 检查本地 ffmpeg_local/ 目录
 	if _, err := os.Stat(local); err == nil {
 		ffmpegPath = local
 		hasDXGI = checkDXGI(local)
 		useFFmpeg = true
+		if !hasDXGI {
+			if askYN("本地 ffmpeg 不支持 dxgigrab（DirectX 捕获），下载 DX 优化版？") {
+				downloadAndExtract()
+				if _, err := os.Stat(local); err == nil {
+					ffmpegPath = local
+					hasDXGI = checkDXGI(local)
+				}
+				// 下载成功则用新版；失败则沿用旧版
+			}
+			// 用户拒绝下载 → 继续使用本地 ffmpeg（gdigrab 回退）
+			if !hasDXGI {
+				log.Printf("→ 使用本地 ffmpeg（gdigrab 模式）")
+			}
+		}
 		return
 	}
+
+	// 2) 检查 PATH 中的 ffmpeg
 	if p, err := exec.LookPath("ffmpeg"); err == nil {
 		ffmpegPath = p
 		hasDXGI = checkDXGI(p)
 		useFFmpeg = true
 		if !hasDXGI {
-			if askYN("当前 ffmpeg 不支持 dxgigrab，下载优化版？") {
+			if askYN("系统 ffmpeg 不支持 dxgigrab（DirectX 捕获），下载 DX 优化版？") {
 				downloadAndExtract()
 				if _, err := os.Stat(local); err == nil {
 					ffmpegPath = local
 					hasDXGI = checkDXGI(local)
 				}
 			}
+			// 用户拒绝下载 → 继续使用 PATH 中的 ffmpeg（gdigrab 回退）
+			if !hasDXGI {
+				log.Printf("→ 使用系统 ffmpeg（gdigrab 模式）")
+			}
 		}
 		return
 	}
-	if askYN("未找到 ffmpeg，自动下载？") {
+
+	// 3) 系统中完全找不到 ffmpeg → 提示下载
+	if askYN("未找到 ffmpeg，自动下载 DX 优化版？") {
 		downloadAndExtract()
 		if _, err := os.Stat(local); err == nil {
 			ffmpegPath = local
@@ -77,6 +102,8 @@ func detectFFmpeg() {
 			return
 		}
 	}
+
+	// 最终回退：纯 Go 截图方案
 	useFFmpeg = false
 	fmt.Println("→ 使用纯 Go 截图方案（无 ffmpeg）")
 }
