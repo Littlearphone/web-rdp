@@ -22,13 +22,16 @@ var (
 	ffPoolMu   sync.Mutex
 )
 
+// ffSession 表示一个正在运行的 ffmpeg 进程会话。
+// 每个显示器+参数组合可共享同一个 ffmpeg 进程（引用计数管理）
 type ffSession struct {
-	cmd     *exec.Cmd
-	stdout  *bufio.Reader
-	frameCh chan []byte
-	stopCh  chan struct{}
+	cmd     *exec.Cmd     // ffmpeg 子进程
+	stdout  *bufio.Reader // 缓冲读取 ffmpeg stdout 管道
+	frameCh chan []byte   // 解码后的帧数据通道
+	stopCh  chan struct{} // 停止信号通道
 }
 
+// stop 终止 ffmpeg 进程并关闭帧通道
 func (f *ffSession) stop() {
 	if f.cmd != nil {
 		close(f.stopCh)
@@ -38,6 +41,9 @@ func (f *ffSession) stop() {
 	}
 }
 
+// acquireFFmpeg 获取或创建指定显示器的 ffmpeg 会话。
+// 如果参数匹配现有会话则复用（引用计数+1），否则停止旧会话并创建新会话。
+// h264 参数决定使用 H.264 还是 MJPEG 编码。
 func acquireFFmpeg(id, quality, maxW int, h264 bool) *ffSession {
 	ffPoolMu.Lock()
 	defer ffPoolMu.Unlock()
@@ -62,6 +68,8 @@ func acquireFFmpeg(id, quality, maxW int, h264 bool) *ffSession {
 	return s
 }
 
+// releaseFFmpeg 释放对指定显示器 ffmpeg 会话的引用。
+// 当引用计数降至 0 时，停止 ffmpeg 进程并清理资源
 func releaseFFmpeg(id int) {
 	ffPoolMu.Lock()
 	defer ffPoolMu.Unlock()
@@ -125,6 +133,10 @@ func startFFmpeg(id, quality, maxW int, h264 bool) *ffSession {
 	var args []string
 	if h264 {
 		args = h264Args(device, capX, capY, capW, capH, vf)
+		// h264Args 返回 nil 表示编码器列表已耗尽，应回退到 MJPEG
+		if args == nil {
+			return nil
+		}
 	} else {
 		args = mjpegArgs(device, capX, capY, capW, capH, vf, ffQ)
 	}
@@ -158,7 +170,8 @@ func startFFmpeg(id, quality, maxW int, h264 bool) *ffSession {
 // ═══════════════════════ H.264 ═══════════════════════
 
 // 根据检测到的 H.264 编码器构建 ffmpeg 参数。
-// GPU 编码器优先（低延迟、低 CPU 占用），CPU libx264 作为回退。
+// GPU 编码器优先（低延迟、低 CPU 占用），libx264 作为最终回退。
+// 当编码器列表耗尽时返回 nil，由调用方回退到 MJPEG。
 func h264Args(device string, cx, cy, cw, ch int, vf string) []string {
 	base := []string{
 		"-hide_banner", "-loglevel", "error",
@@ -171,7 +184,8 @@ func h264Args(device string, cx, cy, cw, ch int, vf string) []string {
 		"-i", "desktop",
 		"-vf", vf,
 	}
-	switch currentH264Encoder() {
+	enc := currentH264Encoder()
+	switch enc {
 	case "h264_nvenc":
 		// NVIDIA GPU：p1=最快速度, ll=低延迟, vbr+cq=可变码率恒定质量
 		base = append(base, "-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ll",
@@ -188,10 +202,13 @@ func h264Args(device string, cx, cy, cw, ch int, vf string) []string {
 		// Windows Media Foundation：系统自带（quality=画质优先）
 		base = append(base, "-c:v", "h264_mf", "-preset", "quality",
 			"-rc", "vbr", "-qp", "28", "-g", "120")
-	default:
+	case "libx264":
 		// CPU 软件编码回退：ultrafast + zerolatency + 单 slice
 		base = append(base, "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
 			"-crf", "28", "-g", "120", "-x264opts", "slices=1:threads=1")
+	default:
+		// 编码器列表已耗尽（currentH264Encoder() 返回 ""），无可用的 H.264 编码器
+		return nil
 	}
 	base = append(base, "-f", "h264", "-flush_packets", "1", "pipe:1")
 	return base
@@ -214,6 +231,8 @@ func findStartCode(data []byte, start int) (int, int) {
 	return -1, 0
 }
 
+// h264Reader 持续从 ffmpeg stdout 读取 H.264 Annex B 原始流，
+// 按起始码切分 NAL 单元并通过 frameCh 发送。遇到读取错误时通知主循环回退。
 func h264Reader(ff *ffSession) {
 	raw := make([]byte, 64*1024)
 	nalBuf := make([]byte, 0, 256*1024)
@@ -263,6 +282,8 @@ func h264Reader(ff *ffSession) {
 
 // ═══════════════════════ MJPEG ═══════════════════════
 
+// mjpegArgs 构建 MJPEG 编码的 ffmpeg 命令行参数。
+// 使用 image2pipe 容器直接输出 JPEG 数据流，前端通过 SOI/EOI 标记分割帧。
 func mjpegArgs(device string, cx, cy, cw, ch int, vf string, ffQ int) []string {
 	return []string{
 		"-hide_banner", "-loglevel", "error",
@@ -280,6 +301,9 @@ func mjpegArgs(device string, cx, cy, cw, ch int, vf string, ffQ int) []string {
 	}
 }
 
+// mjpegReader 持续从 ffmpeg stdout 读取 MJPEG 数据流，
+// 按 SOI (0xFFD8) / EOI (0xFFD9) 标记分割为独立的 JPEG 帧并通过 frameCh 发送。
+// 帧通道满时丢弃旧帧保留新帧，确保低延迟。
 func mjpegReader(ff *ffSession) {
 	buf := make([]byte, 0, 512*1024)
 	for {
@@ -304,6 +328,9 @@ func mjpegReader(ff *ffSession) {
 	}
 }
 
+// readJPEG 从 bufio.Reader 中读取单个完整的 JPEG 帧。
+// 通过扫描 SOI (0xFFD8) 和 EOI (0xFFD9) 标记定位帧边界。
+// 返回值共享传入的 buf 底层数组以减少内存分配。
 func readJPEG(br *bufio.Reader, buf []byte) ([]byte, error) {
 	buf = buf[:0]
 	prev := byte(0)

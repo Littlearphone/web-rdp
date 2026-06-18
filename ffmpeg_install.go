@@ -43,6 +43,8 @@ func tryNextH264Encoder() bool {
 	return false
 }
 
+// detectFFmpeg 自动检测系统中的 ffmpeg 可执行文件。
+// 优先级：本地目录 ffmpeg_local/ → PATH 环境变量 → 在线下载
 func detectFFmpeg() {
 	local := filepath.Join(ffmpegLocalDir, "bin", "ffmpeg.exe")
 	if _, err := os.Stat(local); err == nil {
@@ -99,7 +101,9 @@ func detectGPUVendor() string {
 }
 
 // 按 GPU 品牌 + ffmpeg 编码器可用性构建编码器列表。
-// 优先匹配 GPU 的硬件编码器，然后是 CPU libx264（画质好），最后才是系统 MF 编码器。
+// 优先级：GPU 硬件编码器 → libx264（最终回退）。
+// libx264 始终放在列表末尾，确保所有硬件编码器失败后直接使用 CPU 编码。
+// 注意：h264_mf 在 gdigrab 下不可用（无输出），故不加入回退链。
 func detectH264Encoder() {
 	if len(h264Encoders) > 0 {
 		return
@@ -125,13 +129,10 @@ func detectH264Encoder() {
 			h264Encoders = append(h264Encoders, "h264_qsv")
 		}
 	}
-	// CPU 软件编码（画质最好，兼容性最广）
+	// CPU 软件编码 libx264（画质最好、兼容性最广，作为最终回退，永不跳过）。
+	// 始终放在列表末尾；若 libx264 也失败，tryNextH264Encoder() 返回 false，系统回退到 MJPEG。
 	if strings.Contains(s, "libx264") {
 		h264Encoders = append(h264Encoders, "libx264")
-	}
-	// Windows Media Foundation 作为最后兜底
-	if strings.Contains(s, "h264_mf") {
-		h264Encoders = append(h264Encoders, "h264_mf")
 	}
 	if len(h264Encoders) > 0 {
 		log.Printf("GPU: %s → H.264 编码器: %s (共 %d 个)", vendor, h264Encoders[0], len(h264Encoders))
@@ -140,6 +141,8 @@ func detectH264Encoder() {
 	}
 }
 
+// askYN 在控制台向用户询问 Y/n 问题，返回用户的选择。
+// 直接回车、y、yes 视为确认；其他输入视为拒绝。
 func askYN(prompt string) bool {
 	fmt.Printf("\n⚠ %s [Y/n]: ", prompt)
 	reader := bufio.NewReader(os.Stdin)
@@ -148,6 +151,7 @@ func askYN(prompt string) bool {
 	return line == "" || line == "y" || line == "yes"
 }
 
+// resolveDownloadURL 从 GitHub Releases API 获取最新 win64-gpl ffmpeg 压缩包的下载地址
 func resolveDownloadURL() string {
 	resp, err := httpClient.Get(ffmpegReleaseAPI)
 	if err != nil {
@@ -171,11 +175,15 @@ func resolveDownloadURL() string {
 	return ""
 }
 
+// checkDXGI 检查指定 ffmpeg 是否支持 dxgigrab 设备（DirectX 桌面捕获）
 func checkDXGI(path string) bool {
 	out, err := exec.Command(path, "-hide_banner", "-devices").Output()
 	return err == nil && strings.Contains(string(out), "dxgigrab")
 }
 
+// downloadAndExtract 下载 ffmpeg 压缩包并解压到 ffmpeg_local/ 目录。
+// 包含下载进度条、速度估算和断点续传提示（通过重试机制）。
+// 解压时会自动去除压缩包顶层目录，将 bin/ 等子目录直接放入 ffmpeg_local/。
 func downloadAndExtract() {
 	tmpFile := filepath.Join(os.TempDir(), "ffmpeg_download.zip")
 	defer func() { _ = os.Remove(tmpFile) }()

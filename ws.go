@@ -19,17 +19,20 @@ import (
 	"github.com/kbinani/screenshot"
 )
 
+// wsMessage 封装一条待发送的 WebSocket 消息（类型 + 数据）
 type wsMessage struct {
-	msgType int
-	data    []byte
+	msgType int    // websocket.TextMessage 或 websocket.BinaryMessage
+	data    []byte // 消息负载
 }
 
+// ── 用户管理 ──
 var (
-	userCounter atomic.Int32
-	userMap     = make(map[string]string)
-	userMapMu   sync.Mutex
+	userCounter atomic.Int32              // 用户计数器，用于生成默认用户名
+	userMap     = make(map[string]string) // IP → 用户名映射
+	userMapMu   sync.Mutex                // 用户映射的互斥锁
 )
 
+// userNameFor 根据客户端 IP 获取或分配用户名。同一 IP 多次连接返回相同用户名
 func userNameFor(ip string) string {
 	userMapMu.Lock()
 	defer userMapMu.Unlock()
@@ -41,9 +44,12 @@ func userNameFor(ip string) string {
 	return name
 }
 
+// handleWS 处理单个 WebSocket 连接的生命周期。
+// 启动后持续读取控制消息并截屏推流，支持 MJPEG / H.264 双编码格式动态切换。
+// 当连接断开或 ffmpeg 异常退出时自动清理资源。
 func handleWS(conn *websocket.Conn, r *http.Request) {
 	var ff *ffSession
-	var useH264 atomic.Bool // 默认 MJPEG，原子操作避免 data race
+	var useH264 atomic.Bool // H.264 优先，原子操作避免 data race
 	var curScreen int = -1
 	ip := r.RemoteAddr
 	if idx := strings.LastIndex(ip, ":"); idx != -1 {
@@ -59,6 +65,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 	}()
 
 	// ── 发送用户名 + 编码格式 ──
+	useH264.Store(currentH264Encoder() != "") // 有可用 H.264 编码器则默认启用
 	format := "jpeg"
 	if useH264.Load() {
 		format = "h264"
@@ -171,6 +178,12 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 					if h264 && tryNextH264Encoder() {
 						continue // 回退到下一个编码器重试
 					}
+					// 所有 H.264 编码器已耗尽，回退到 MJPEG
+					if h264 {
+						useH264.Store(false)
+						log.Printf("所有 H.264 编码器已耗尽，回退到 MJPEG")
+						continue
+					}
 					time.Sleep(time.Second)
 					continue
 				}
@@ -194,11 +207,17 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			select {
 			case data = <-ff.frameCh:
 				if data == nil {
+					releaseFFmpeg(curScreen) // 清理池中已死的 session，避免 acquireFFmpeg 复用
 					ff = nil
 					ffScreen = -1
 					curScreen = -1
 					if ffH264 && tryNextH264Encoder() {
 						continue // ffmpeg异常退出，即时回退
+					}
+					// 所有 H.264 编码器已耗尽，回退到 MJPEG
+					if ffH264 {
+						useH264.Store(false)
+						log.Printf("所有 H.264 编码器已耗尽，回退到 MJPEG")
 					}
 					continue
 				}
@@ -212,6 +231,11 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				curScreen = -1
 				if ffH264 && tryNextH264Encoder() {
 					continue // GPU编码器运行时失败，回退
+				}
+				// 所有 H.264 编码器已耗尽，回退到 MJPEG
+				if ffH264 {
+					useH264.Store(false)
+					log.Printf("所有 H.264 编码器已耗尽，回退到 MJPEG")
 				}
 				continue
 			}

@@ -12,12 +12,15 @@ import (
 )
 
 // ── 缩放比缓存 ──
-
+// 缓存每个显示器的 DPI 缩放比（zoom factor），避免重复调用 EnumDisplayMonitors API
 var (
 	zoomCache   = make(map[int]float64)
 	zoomCacheMu sync.RWMutex
 )
 
+// getScreenZoom 获取指定显示器的 DPI 缩放比。
+// 通过 EnumDisplayMonitors 获取逻辑分辨率，与 screenshot 物理分辨率对比计算出缩放因子。
+// 结果会被缓存，避免重复的 Windows API 调用。
 func getScreenZoom(id int) float64 {
 	zoomCacheMu.RLock()
 	if z, ok := zoomCache[id]; ok {
@@ -46,6 +49,9 @@ func getScreenZoom(id int) float64 {
 	return z
 }
 
+// encodeFrame 将 MJPEG 帧数据与元数据打包为网络传输格式。
+// 二进制布局: [ox(4B)] [oy(4B)] [pw(4B)] [ph(4B)] [zoom(8B)] [JPEG数据]
+// H.264 模式不使用此函数，直接裸发 NAL 单元
 func encodeFrame(ox, oy, pw, ph int32, zoom float64, jpg []byte) []byte {
 	buf := make([]byte, 24+len(jpg))
 	binary.LittleEndian.PutUint32(buf[0:4], uint32(ox))
@@ -57,6 +63,8 @@ func encodeFrame(ox, oy, pw, ph int32, zoom float64, jpg []byte) []byte {
 	return buf
 }
 
+// downscale 使用双线性插值将图像缩放到指定最大宽度（等比缩放）。
+// 仅在纯 Go 截图回退路径中使用；ffmpeg 路径在命令行中完成缩放。
 func downscale(img *image.RGBA, maxW int) *image.RGBA {
 	if maxW <= 0 || img.Bounds().Dx() <= maxW {
 		return img
