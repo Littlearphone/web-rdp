@@ -197,6 +197,9 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 					ff = nil
 					ffScreen = -1
 					curScreen = -1
+					if ffH264 && tryNextH264Encoder() {
+						continue // ffmpeg异常退出，即时回退
+					}
 					continue
 				}
 			case <-readErr:

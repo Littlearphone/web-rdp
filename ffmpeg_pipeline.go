@@ -217,37 +217,45 @@ func findStartCode(data []byte, start int) (int, int) {
 func h264Reader(ff *ffSession) {
 	raw := make([]byte, 64*1024)
 	nalBuf := make([]byte, 0, 256*1024)
+	sentFrames := false // 是否曾成功发送帧（用于判断 ffmpeg 是否异常退出）
 
 	for {
 		select {
 		case <-ff.stopCh:
-			return
+			return // 主动停止，正常退出
 		default:
 		}
 		n, err := ff.stdout.Read(raw)
 		if err != nil {
+			// ffmpeg 进程退出（驱动不支持、参数错误等）
+			// 如果未发送任何帧，通知主循环即时回退，无需等 5 秒超时
+			if !sentFrames {
+				select {
+				case ff.frameCh <- nil:
+				default:
+				}
+			}
 			return
 		}
 		nalBuf = append(nalBuf, raw[:n]...)
 
 		for len(nalBuf) > 3 {
-			// 找到第一个起始码
 			firstSC, firstLen := findStartCode(nalBuf, 0)
 			if firstSC < 0 {
-				break // 缓冲区里没有起始码，等更多数据
+				break
 			}
 			if firstSC > 0 {
-				nalBuf = nalBuf[firstSC:] // 丢弃起始码前的无效字节
+				nalBuf = nalBuf[firstSC:]
 				continue
 			}
-			// nalBuf 现在以起始码开头，找下一个起始码
 			nextSC, _ := findStartCode(nalBuf, firstLen)
 			if nextSC < 0 {
-				break // 还没收到完整的 NAL，等更多数据
+				break
 			}
 			frame := make([]byte, nextSC)
 			copy(frame, nalBuf[:nextSC])
-			ff.frameCh <- frame // H.264 阻塞发送，不丢帧（SPS/PPS 不可丢失）
+			ff.frameCh <- frame
+			sentFrames = true
 			nalBuf = nalBuf[nextSC:]
 		}
 	}
