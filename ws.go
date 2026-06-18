@@ -103,7 +103,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 					_, _, _ = procSetCursorPos.Call(uintptr(*cm.MX), uintptr(*cm.MY))
 				}
 				if cm.Webcodecs != nil {
-					useH264.Store(*cm.Webcodecs && h264Encoder != "")
+					useH264.Store(*cm.Webcodecs && currentH264Encoder() != "")
 				}
 				if cm.Control != nil {
 					if *cm.Control {
@@ -168,6 +168,9 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				ff = acquireFFmpeg(id, q, mw, h264)
 				if ff == nil {
 					log.Printf("ffmpeg 启动失败")
+					if h264 && tryNextH264Encoder() {
+						continue // 回退到下一个编码器重试
+					}
 					time.Sleep(time.Second)
 					continue
 				}
@@ -204,6 +207,9 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				ff = nil
 				ffScreen = -1
 				curScreen = -1
+				if ffH264 && tryNextH264Encoder() {
+					continue // GPU编码器运行时失败，回退
+				}
 				continue
 			}
 

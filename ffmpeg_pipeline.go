@@ -130,7 +130,6 @@ func startFFmpeg(id, quality, maxW int, h264 bool) *ffSession {
 	}
 
 	cmd := exec.Command(ffmpegPath, args...)
-	cmd.Stderr = log.Writer()
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil
@@ -158,8 +157,10 @@ func startFFmpeg(id, quality, maxW int, h264 bool) *ffSession {
 
 // ═══════════════════════ H.264 ═══════════════════════
 
+// 根据检测到的 H.264 编码器构建 ffmpeg 参数。
+// GPU 编码器优先（低延迟、低 CPU 占用），CPU libx264 作为回退。
 func h264Args(device string, cx, cy, cw, ch int, vf string) []string {
-	return []string{
+	base := []string{
 		"-hide_banner", "-loglevel", "error",
 		"-sws_flags", "fast_bilinear",
 		"-f", device, "-framerate", "60",
@@ -169,11 +170,31 @@ func h264Args(device string, cx, cy, cw, ch int, vf string) []string {
 		"-video_size", fmt.Sprintf("%dx%d", cw, ch),
 		"-i", "desktop",
 		"-vf", vf,
-		"-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-		"-crf", "28", "-g", "120", "-x264opts", "slices=1:threads=1",
-		"-f", "h264", "-flush_packets", "1",
-		"pipe:1",
 	}
+	switch currentH264Encoder() {
+	case "h264_nvenc":
+		// NVIDIA GPU：p1=最快速度, ll=低延迟, vbr+cq=可变码率恒定质量
+		base = append(base, "-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ll",
+			"-rc", "vbr", "-cq", "28", "-g", "120")
+	case "h264_amf":
+		// AMD GPU：speed=最快速度, cqp=恒定质量
+		base = append(base, "-c:v", "h264_amf", "-quality", "speed",
+			"-rc", "cqp", "-qp_p", "28", "-qp_i", "28", "-g", "120")
+	case "h264_qsv":
+		// Intel Quick Sync：look_ahead=0 关闭前瞻减少延迟
+		base = append(base, "-c:v", "h264_qsv", "-preset", "veryfast", "-look_ahead", "0",
+			"-g", "120", "-global_quality", "28")
+	case "h264_mf":
+		// Windows Media Foundation：系统自带（quality=画质优先）
+		base = append(base, "-c:v", "h264_mf", "-preset", "quality",
+			"-rc", "vbr", "-qp", "28", "-g", "120")
+	default:
+		// CPU 软件编码回退：ultrafast + zerolatency + 单 slice
+		base = append(base, "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+			"-crf", "28", "-g", "120", "-x264opts", "slices=1:threads=1")
+	}
+	base = append(base, "-f", "h264", "-flush_packets", "1", "pipe:1")
+	return base
 }
 
 // findStartCode 在 data[start:] 中查找 H.264 起始码

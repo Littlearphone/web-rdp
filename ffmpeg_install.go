@@ -18,11 +18,30 @@ const ffmpegLocalDir = "ffmpeg_local"
 const ffmpegReleaseAPI = "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest"
 
 var (
-	ffmpegPath  string
-	hasDXGI     bool
-	useFFmpeg   bool
-	h264Encoder = ""
+	ffmpegPath   string
+	hasDXGI      bool
+	useFFmpeg    bool
+	h264Encoders []string // 可用编码器列表（GPU优先，CPU回退）
+	h264EncIdx   int      // 当前使用的编码器索引
 )
+
+// 返回当前选中的 H.264 编码器名称
+func currentH264Encoder() string {
+	if h264EncIdx < len(h264Encoders) {
+		return h264Encoders[h264EncIdx]
+	}
+	return ""
+}
+
+// 编码器失败时切换到下一个可用编码器，返回是否还有可用选项
+func tryNextH264Encoder() bool {
+	h264EncIdx++
+	if h264EncIdx < len(h264Encoders) {
+		log.Printf("H.264 编码器回退 → %s", h264Encoders[h264EncIdx])
+		return true
+	}
+	return false
+}
 
 func detectFFmpeg() {
 	local := filepath.Join(ffmpegLocalDir, "bin", "ffmpeg.exe")
@@ -60,17 +79,64 @@ func detectFFmpeg() {
 	fmt.Println("→ 使用纯 Go 截图方案（无 ffmpeg）")
 }
 
+// 通过 wmic 检测主显卡品牌，避免盲目尝试不兼容的 GPU 编码器
+func detectGPUVendor() string {
+	out, err := exec.Command("wmic", "path", "win32_VideoController", "get", "name").Output()
+	if err != nil {
+		return ""
+	}
+	s := strings.ToLower(string(out))
+	if strings.Contains(s, "nvidia") {
+		return "nvidia"
+	}
+	if strings.Contains(s, "amd") || strings.Contains(s, "radeon") {
+		return "amd"
+	}
+	if strings.Contains(s, "intel") {
+		return "intel"
+	}
+	return ""
+}
+
+// 按 GPU 品牌 + ffmpeg 编码器可用性构建编码器列表。
+// 优先匹配 GPU 的硬件编码器，然后是 CPU libx264（画质好），最后才是系统 MF 编码器。
 func detectH264Encoder() {
-	if h264Encoder != "" {
+	if len(h264Encoders) > 0 {
 		return
 	}
 	out, err := exec.Command(ffmpegPath, "-hide_banner", "-encoders").Output()
 	if err != nil {
 		return
 	}
-	if strings.Contains(string(out), "libx264") {
-		h264Encoder = "libx264"
-		log.Printf("H.264: libx264")
+	s := string(out)
+	vendor := detectGPUVendor()
+	// 只添加匹配当前 GPU 品牌的硬件编码器
+	switch vendor {
+	case "nvidia":
+		if strings.Contains(s, "h264_nvenc") {
+			h264Encoders = append(h264Encoders, "h264_nvenc")
+		}
+	case "amd":
+		if strings.Contains(s, "h264_amf") {
+			h264Encoders = append(h264Encoders, "h264_amf")
+		}
+	case "intel":
+		if strings.Contains(s, "h264_qsv") {
+			h264Encoders = append(h264Encoders, "h264_qsv")
+		}
+	}
+	// CPU 软件编码（画质最好，兼容性最广）
+	if strings.Contains(s, "libx264") {
+		h264Encoders = append(h264Encoders, "libx264")
+	}
+	// Windows Media Foundation 作为最后兜底
+	if strings.Contains(s, "h264_mf") {
+		h264Encoders = append(h264Encoders, "h264_mf")
+	}
+	if len(h264Encoders) > 0 {
+		log.Printf("GPU: %s → H.264 编码器: %s (共 %d 个)", vendor, h264Encoders[0], len(h264Encoders))
+	} else {
+		log.Printf("GPU: %s → 未找到可用 H.264 编码器", vendor)
 	}
 }
 
