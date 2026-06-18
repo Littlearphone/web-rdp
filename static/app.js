@@ -13,7 +13,7 @@ const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) && window
 let meta = { ox: 0, oy: 0, pw: 1, ph: 1, zoom: 1.0 }, serverAddr = window.location.host;
 let ws = null, reconnectTimer = null, reconnectDelay = 5, reconnectCountdown = 0, wasConnected = false, lastResKey = '';
 let currentQ = 75, currentMW = 0, currentScreen = 0, screenCount = 1, mobileResOpts = [], mobileUIBuilt = false;
-let streamFormat = 'jpeg', useH264 = false;
+let streamFormat = 'jpeg', useH264 = true; // H.264 为默认编码，MJPEG 为备选
 
 function send(o) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(o)); }
 // 将当前画质/分辨率/H.264 设置发送到后端，后端据此重启 ffmpeg 或切换编码器
