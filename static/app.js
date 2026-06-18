@@ -14,6 +14,7 @@ let meta = { ox: 0, oy: 0, pw: 1, ph: 1, zoom: 1.0 }, serverAddr = window.locati
 let ws = null, reconnectTimer = null, reconnectDelay = 5, reconnectCountdown = 0, wasConnected = false, lastResKey = '';
 let currentQ = 75, currentMW = 0, currentScreen = 0, screenCount = 1, mobileResOpts = [], mobileUIBuilt = false;
 let streamFormat = 'jpeg', useH264 = true; // H.264 为默认编码，MJPEG 为备选
+let origPw = 0, origPh = 0; // 远程桌面原始分辨率（缩放前），用于生成分辨率选项列表
 
 function send(o) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(o)); }
 // 将当前画质/分辨率/H.264 设置发送到后端，后端据此重启 ffmpeg 或切换编码器
@@ -138,14 +139,17 @@ const H264 = {
     this.close();
     this.decoder = new VideoDecoder({
       output: frame => {
-        // 首帧或分辨率变化时调整 canvas 尺寸
-        if (cw !== frame.displayWidth || ch !== frame.displayHeight) {
-          canvas.width = frame.displayWidth; canvas.height = frame.displayHeight;
-          cw = frame.displayWidth; ch = frame.displayHeight;
+        const pw = frame.displayWidth, ph = frame.displayHeight;
+        // 首帧或分辨率变化时调整 canvas 尺寸 + 更新 meta + 刷新分辨率选项
+        if (cw !== pw || ch !== ph) {
+          canvas.width = pw; canvas.height = ph;
+          cw = pw; ch = ph;
+          meta.pw = pw; meta.ph = ph;
+          updateOrigRes(pw, ph);
+          const bp = basePw(pw), bh = basePh(ph), k = `${bp}x${bh}`;
+          if (k !== lastResKey) { lastResKey = k; if (isMobile) { mobileUIBuilt = false; updateMobileResolutions(bp, bh); } else { buildDesktopResolutions(bp, bh); } }
         }
-        ctx.drawImage(frame, 0, 0);     // 渲染解码后的 VideoFrame 到 canvas
-        frame.close();                   // 释放 VideoFrame 底层资源
-        // 格式切换完成标记：从"切换中..."恢复为"已连接"
+        ctx.drawImage(frame, 0, 0); frame.close();
         if (statusEl.textContent === '切换中...') { statusEl.textContent = '已连接'; statusEl.style.color = '#27ae60'; }
       },
       error: e => console.error('H264 解码错误:', e.message)
@@ -240,8 +244,10 @@ const JPEG = {
     const pw = dv.getInt32(8, true), ph = dv.getInt32(12, true);
     if (pw < 100 || pw > 10000 || ph < 100 || ph > 10000) return; // 长宽校验，防止 H.264 数据被误解析为 JPEG
     meta = { ox: dv.getInt32(0, true), oy: dv.getInt32(4, true), pw, ph, zoom: dv.getFloat64(16, true) };
-    if (isMobile) { const k = `${pw}x${ph}`; if (k !== lastResKey) { lastResKey = k; mobileUIBuilt = false; updateMobileResolutions(pw, ph); } }
-    else { const k = `${pw}x${ph}`; if (k !== lastResKey) { lastResKey = k; buildDesktopResolutions(pw, ph); } }
+    updateOrigRes(pw, ph);
+    const bp = basePw(pw), bh = basePh(ph), k = `${bp}x${bh}`;
+    if (isMobile) { if (k !== lastResKey) { lastResKey = k; mobileUIBuilt = false; updateMobileResolutions(bp, bh); } }
+    else { if (k !== lastResKey) { lastResKey = k; buildDesktopResolutions(bp, bh); } }
     const jpg = new Uint8Array(buf, 24); // JPEG 数据从偏移 24 开始（跳过 24 字节元数据头）
     createImageBitmap(new Blob([jpg], { type: 'image/jpeg' })).then(bmp => {
       if (cw !== bmp.width || ch !== bmp.height) { canvas.width = bmp.width; canvas.height = bmp.height; cw = bmp.width; ch = bmp.height; }
@@ -260,11 +266,25 @@ function resetDecoders() { H264.reset(); JPEG.reset(); }
 // ═══════════════════════════════════════════
 // 分辨率选项（桌面 & 移动共用）
 // ═══════════════════════════════════════════
-function buildResolutions(pw, ph) {
-  if (isMobile) { const m = Math.min(pw, Math.round(innerWidth * (devicePixelRatio || 1))), o = [{ label: '适配', w: m }]; for (const t of [720, 480]) { if (t >= ph) continue; o.push({ label: `${t}p`, w: Math.round(pw * t / ph) }); } return o.filter((o, i) => o.findIndex(x => x.w === o.w) === i); }
-  const o = [{ label: `原始 (${pw}×${ph})`, value: 0 }]; for (const t of [1080, 720, 480]) { if (t >= ph) continue; o.push({ label: `${Math.round(pw * t / ph)}×${t}`, value: Math.round(pw * t / ph) }); } return o;
+// 更新远程桌面原始分辨率。仅在以下情况更新：
+// 1. 尚未记录原始分辨率（首帧）
+// 2. 当前为原始分辨率模式（currentMW === 0，无缩放）
+// 3. 帧分辨率大于已记录的原始值（切换到了更大的显示器）
+function updateOrigRes(pw, ph) {
+  if (origPw === 0 || currentMW === 0 || pw > origPw || ph > origPh) {
+    if (origPw !== pw || origPh !== ph) { origPw = pw; origPh = ph; return true; }
+  }
+  return false;
 }
-function applyResolutions(pw, ph) { const k = `${pw}x${ph}`; if (k === lastResKey) return; lastResKey = k; const o = buildResolutions(pw, ph), c = maxwSelect.value; maxwSelect.innerHTML = ''; o.forEach(o => { const e = document.createElement('option'); e.value = o.value || o.w; e.textContent = o.label; maxwSelect.appendChild(e); }); maxwSelect.value = o.find(o => String(o.value || o.w) === c) ? c : String(o[0].value || o[0].w); currentMW = parseInt(maxwSelect.value); sendSettings(); }
+// 获取用于生成分辨率选项列表的基准分辨率（优先使用原始分辨率）
+function basePw(pw) { return origPw || pw; }
+function basePh(ph) { return origPh || ph; }
+
+function buildResolutions(pw, ph) {
+  if (isMobile) { const bp = basePw(pw), bh = basePh(ph), m = Math.min(bp, Math.round(innerWidth * (devicePixelRatio || 1))), o = [{ label: '适配', w: m }]; for (const t of [720, 480]) { if (t >= bh) continue; o.push({ label: `${t}p`, w: Math.round(bp * t / bh) }); } return o.filter((o, i) => o.findIndex(x => x.w === o.w) === i); }
+  const bp = basePw(pw), bh = basePh(ph), o = [{ label: `原始 (${bp}×${bh})`, value: 0 }]; for (const t of [1080, 720, 480]) { if (t >= bh) continue; o.push({ label: `${Math.round(bp * t / bh)}×${t}`, value: Math.round(bp * t / bh) }); } return o;
+}
+function applyResolutions(pw, ph) { updateOrigRes(pw, ph); const bp = basePw(pw), bh = basePh(ph), k = `${bp}x${bh}`; if (k === lastResKey) return; lastResKey = k; const o = buildResolutions(bp, bh), c = maxwSelect.value; maxwSelect.innerHTML = ''; o.forEach(o => { const e = document.createElement('option'); e.value = o.value || o.w; e.textContent = o.label; maxwSelect.appendChild(e); }); maxwSelect.value = o.find(o => String(o.value || o.w) === c) ? c : String(o[0].value || o[0].w); currentMW = parseInt(maxwSelect.value); sendSettings(); }
 
 // ═══════════════════════════════════════════
 // WebSocket 连接管理
@@ -302,6 +322,8 @@ function onMessage(event) {
       // 控制权信息
       if (s.owner !== undefined) { const me = statsEl.getAttribute('data-user') || '', im = s.owner === me; controlCheck.disabled = !im && s.owner !== ''; controlCheck.checked = im; controlCheck.parentElement.title = s.owner ? `控制权:${s.owner}` : '点击获取控制权'; canvas.style.cursor = 'crosshair'; }
       // 屏幕数量变化
+      // 从 stats 更新坐标元数据（H.264 帧不含此信息，依赖 stats 同步）
+      if (s.ox !== undefined) { meta.ox = s.ox; meta.oy = s.oy; meta.zoom = s.zoom; }
       if (s.screens > 0 && s.screens !== screenCount) { screenCount = s.screens; isMobile ? (mobileUIBuilt = false, updateMobileUI()) : updateDesktopScreens(); }
     } catch (_) { }
     return;
@@ -327,7 +349,8 @@ statusEl.onclick = () => { if (!ws || ws.readyState !== WebSocket.OPEN) { clearR
 // ═══════════════════════════════════════════
 if (!isMobile) {
   function updateDesktopScreens() { const c = select.value; select.innerHTML = ''; for (let i = 0; i < screenCount; i++) { const e = document.createElement('option'); e.value = i; e.textContent = i === 0 ? '主屏 (0)' : `副屏 (${i})`; select.appendChild(e); } select.value = c < screenCount ? c : '0'; }
-  function buildDesktopResolutions(pw, ph) { const o = buildResolutions(pw, ph), c = maxwSelect.value; maxwSelect.innerHTML = ''; o.forEach(o => { const e = document.createElement('option'); e.value = o.value; e.textContent = o.label; maxwSelect.appendChild(e); }); maxwSelect.value = o.find(o => String(o.value) === c) ? c : '0'; }
+  // 桌面端分辨率选项更新。仅刷新 UI 不触发 sendSettings（避免缩放选项消失后误切回原始分辨率）
+function buildDesktopResolutions(pw, ph) { const o = buildResolutions(pw, ph), c = maxwSelect.value; maxwSelect.innerHTML = ''; o.forEach(o => { const e = document.createElement('option'); e.value = o.value; e.textContent = o.label; maxwSelect.appendChild(e); }); const match = o.find(o => String(o.value) === c); maxwSelect.value = match ? c : String(o[0].value || o[0].w || '0'); }
   qualitySlider.oninput = () => { qualityVal.textContent = qualitySlider.value; }; qualitySlider.onchange = () => { currentQ = parseInt(qualitySlider.value); sendSettings(); }; maxwSelect.onchange = () => { currentMW = parseInt(maxwSelect.value); sendSettings(); }; select.onchange = () => { currentScreen = parseInt(select.value); currentMW = 0; send({ screen: currentScreen, maxw: 0 }); lastResKey = ''; };
   controlCheck.onchange = () => { send({ control: controlCheck.checked }); canvas.style.cursor = 'crosshair'; };
   // H.264 切换：重置解码器状态，显示"切换中..."提示，发送设置到后端。
