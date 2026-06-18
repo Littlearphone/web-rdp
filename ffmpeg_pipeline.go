@@ -110,8 +110,15 @@ func startFFmpeg(id, quality, maxW int, h264 bool) *ffSession {
 
 	vf := "format=yuv420p"
 	if maxW > 0 && capW > maxW {
-		outH = capH * maxW / capW
 		outW = maxW
+		outH = capH * outW / capW
+		// yuv420p / H.264 要求宽高均为偶数，奇数会导致 libx264 拒绝编码
+		if outW%2 != 0 {
+			outW--
+		}
+		if outH%2 != 0 {
+			outH--
+		}
 		vf = fmt.Sprintf("scale=%d:%d:flags=fast_bilinear,format=yuv420p", outW, outH)
 	}
 
