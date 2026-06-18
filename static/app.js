@@ -25,11 +25,33 @@ function sendKey(code, down) { send({ key: code, down: down }); }
 //   依赖：canvas, cw, ch, meta（全局）
 // ═══════════════════════════════════════════
 const H264 = {
-  decoder: null, ready: false, buf: new Uint8Array(0),
-  reset() { this.close(); this.buf = new Uint8Array(0); this.ready = false; },
+  decoder: null, ready: false, buf: new Uint8Array(0), ts: 0,
+  reset() { this.close(); this.buf = new Uint8Array(0); this.ready = false; this.ts = 0; this.firstDecode = false; },
   close() { if (this.decoder) { try { this.decoder.close() } catch (_) { } this.decoder = null; } },
 
-  findSC(d, o) { for (let i = o; i < d.length - 3; i++) if (d[i] === 0 && d[i + 1] === 0 && d[i + 2] === 0 && d[i + 3] === 1) return i; return -1; },
+  // 查找起始码（3字节 00 00 01 或 4字节 00 00 00 01），返回位置
+  findSC(d, o) {
+    for (let i = o; i < d.length - 2; i++) {
+      if (d[i] === 0 && d[i + 1] === 0) {
+        if (d[i + 2] === 1) return i;                       // 3字节
+        if (i < d.length - 3 && d[i + 2] === 0 && d[i + 3] === 1) return i; // 4字节
+      }
+    }
+    return -1;
+  },
+  // 返回位置 pos 处起始码的长度（3 或 4）
+  scLen(d, pos) {
+    if (pos + 3 < d.length && d[pos] === 0 && d[pos + 1] === 0 && d[pos + 2] === 0 && d[pos + 3] === 1) return 4;
+    return 3;
+  },
+
+  buildCodecString(sps) {
+    // sps[1]=profile_idc, sps[2]=constraint flags, sps[3]=level_idc
+    const p = sps[1].toString(16).toUpperCase().padStart(2, '0');
+    const c = sps[2].toString(16).toUpperCase().padStart(2, '0');
+    const l = sps[3].toString(16).toUpperCase().padStart(2, '0');
+    return 'avc1.' + p + c + l;
+  },
 
   buildAvcC(sps, pps) {
     const d = new Uint8Array(11 + sps.length + pps.length);
@@ -41,8 +63,9 @@ const H264 = {
 
   annexbToAvcc(data) {
     const parts = []; let pos = 0;
-    while (pos < data.length - 3) {
-      const sc = this.findSC(data, pos); if (sc < 0) break; pos = sc + 4;
+    while (pos < data.length - 2) {
+      const sc = this.findSC(data, pos); if (sc < 0) break;
+      const sl = this.scLen(data, sc); pos = sc + sl;
       const n = this.findSC(data, pos); const end = n >= 0 ? n : data.length;
       const nal = data.slice(pos, end);
       const h = new Uint8Array(4); h[0] = (nal.length >> 24) & 0xFF; h[1] = (nal.length >> 16) & 0xFF; h[2] = (nal.length >> 8) & 0xFF; h[3] = nal.length & 0xFF;
@@ -55,44 +78,76 @@ const H264 = {
   },
 
   init() {
-    let pos = 0, sps = null, pps = null;
+    let pos = 0, sps = null, pps = null, spsSC = -1, ppsSC = -1, firstIDR = -1, nalCnt = 0;
     while (pos < this.buf.length - 3) {
       const sc = this.findSC(this.buf, pos); if (sc < 0) break;
-      const n = this.findSC(this.buf, sc + 4); const end = n >= 0 ? n : this.buf.length;
-      const nal = this.buf.slice(sc + 4, end); const t = nal[0] & 0x1F;
-      if (t === 7) sps = nal; if (t === 8) pps = nal;
-      if (n < 0) break; pos = n + 4;
+      const sl = this.scLen(this.buf, sc);
+      const n = this.findSC(this.buf, sc + sl); const end = n >= 0 ? n : this.buf.length;
+      const nal = this.buf.slice(sc + sl, end); const t = nal[0] & 0x1F;
+      nalCnt++; console.log('H264 init: NAL#' + nalCnt + ' type=' + t + ' len=' + nal.length + ' sc=' + sc + ' sl=' + sl);
+      if (t === 7) { sps = nal; spsSC = sc; }
+      if (t === 8) { pps = nal; ppsSC = sc; }
+      if (t === 5 && firstIDR < 0) firstIDR = sc;
+      if (n < 0) break; pos = n;
     }
-    if (!sps || !pps) return false;
+    if (!sps || !pps) { console.log('H264 init: 等待 SPS/PPS, buf=' + this.buf.length + 'B'); return false; }
+    console.log('H264 init: SPS=' + sps.length + 'B PPS=' + pps.length + 'B firstIDR@' + firstIDR + ' codec=' + this.buildCodecString(sps));
     this.close();
     this.decoder = new VideoDecoder({
       output: frame => {
         if (cw !== frame.displayWidth || ch !== frame.displayHeight) { canvas.width = frame.displayWidth; canvas.height = frame.displayHeight; cw = frame.displayWidth; ch = frame.displayHeight; }
         ctx.drawImage(frame, 0, 0); frame.close();
+        if (statusEl.textContent === '切换中...') { statusEl.textContent = '已连接'; statusEl.style.color = '#27ae60'; }
       },
-      error: e => console.error('h264:', e)
+      error: e => console.error('H264 解码错误:', e.message, e)
     });
-    this.decoder.configure({ codec: 'avc1.42E01E', description: this.buildAvcC(sps, pps) });
-    this.ready = true; return true;
+    try {
+      this.decoder.configure({ codec: this.buildCodecString(sps), description: this.buildAvcC(sps, pps) });
+      console.log('H264 init: VideoDecoder 已配置 ready=true');
+      this.ready = true; this.ts = 0; this.firstDecode = true;
+      // 裁剪到第一个 IDR（如有），否则保留缓冲区等 IDR 到来后在 feed() 中跳过非关键帧
+      if (firstIDR >= 0) { this.buf = this.buf.slice(firstIDR); this.firstDecode = false; }
+      return true;
+    } catch (e) {
+      console.error('H264 configure 失败:', e.message);
+      this.close();
+      return false;
+    }
   },
 
   decode(data) {
-    if (data.length < 5 || !this.decoder) return;
-    const t = data[4] & 0x1F;
+    const sl = this.scLen(data, 0);
+    if (data.length < sl + 1 || !this.decoder) return;
+    const t = data[sl] & 0x1F;
     try {
       const avcc = this.annexbToAvcc(data);
-      this.decoder.decode(new EncodedVideoChunk({ type: (t === 5 || t === 7) ? 'key' : 'delta', timestamp: 0, data: avcc }));
-    } catch (_) { }
+      this.decoder.decode(new EncodedVideoChunk({ type: t === 5 ? 'key' : 'delta', timestamp: this.ts++ * 33333, data: avcc }));
+      console.log('H264 decode: type=' + t + ' ts=' + (this.ts-1) + ' len=' + data.length);
+    } catch (e) { console.error('H264 decode异常:', e.message); }
   },
 
   feed(raw) {
     const chunk = new Uint8Array(raw);
     const t = new Uint8Array(this.buf.length + chunk.length); t.set(this.buf); t.set(chunk, this.buf.length); this.buf = t;
     if (!this.ready) { if (!this.init()) return; }
-    while (this.ready && this.buf.length > 4) {
-      const sc = this.findSC(this.buf, 4); if (sc < 0) break;
+    while (this.ready && this.buf.length > 3) {
+      const sl = this.scLen(this.buf, 0);
+      // 等待首个 IDR 关键帧：configure() 后第一个 decode() 必须是 keyframe
+      if (this.firstDecode) {
+        const t = this.buf[sl] & 0x1F;
+        if (t !== 5) {
+          const sc = this.findSC(this.buf, sl);
+          if (sc < 0) { this.buf = new Uint8Array(0); break; }
+          this.buf = this.buf.slice(sc); // 跳过此非 IDR NAL
+          console.log('H264: 跳过非关键帧 type=' + t + ', 等待 IDR...');
+          continue;
+        }
+        this.firstDecode = false;
+      }
+      const sc = this.findSC(this.buf, sl);
+      if (sc < 0) { const c = this.buf; this.buf = new Uint8Array(0); if (c.length > sl) this.decode(c); break; }
       const c = this.buf.slice(0, sc); this.buf = this.buf.slice(sc);
-      if (c.length > 4) this.decode(c);
+      if (c.length > sl) this.decode(c);
     }
   }
 };
@@ -107,9 +162,11 @@ const JPEG = {
   close() { },
   feed(buf) {
     const dv = new DataView(buf);
-    meta = { ox: dv.getInt32(0, true), oy: dv.getInt32(4, true), pw: dv.getInt32(8, true), ph: dv.getInt32(12, true), zoom: dv.getFloat64(16, true) };
-    if (isMobile) { const k = `${meta.pw}x${meta.ph}`; if (k !== lastResKey) { lastResKey = k; mobileUIBuilt = false; updateMobileResolutions(meta.pw, meta.ph); } }
-    else { const k = `${meta.pw}x${meta.ph}`; if (k !== lastResKey) { lastResKey = k; buildDesktopResolutions(meta.pw, meta.ph); } }
+    const pw = dv.getInt32(8, true), ph = dv.getInt32(12, true);
+    if (pw < 100 || pw > 10000 || ph < 100 || ph > 10000) return; // 校验防止误解析
+    meta = { ox: dv.getInt32(0, true), oy: dv.getInt32(4, true), pw, ph, zoom: dv.getFloat64(16, true) };
+    if (isMobile) { const k = `${pw}x${ph}`; if (k !== lastResKey) { lastResKey = k; mobileUIBuilt = false; updateMobileResolutions(pw, ph); } }
+    else { const k = `${pw}x${ph}`; if (k !== lastResKey) { lastResKey = k; buildDesktopResolutions(pw, ph); } }
     const jpg = new Uint8Array(buf, 24);
     createImageBitmap(new Blob([jpg], { type: 'image/jpeg' })).then(bmp => {
       if (cw !== bmp.width || ch !== bmp.height) { canvas.width = bmp.width; canvas.height = bmp.height; cw = bmp.width; ch = bmp.height; }
@@ -150,8 +207,9 @@ function onMessage(event) {
   if (typeof event.data === 'string') {
     try {
       const s = JSON.parse(event.data);
-      // 用户名 + 格式
-      if (s.user) { statsEl.setAttribute('data-user', s.user); if (s.format) streamFormat = s.format; return; }
+      // 用户名
+      if (s.user) { statsEl.setAttribute('data-user', s.user); }
+      if (s.format) { if (streamFormat !== s.format) { console.log('格式切换: ' + streamFormat + ' → ' + s.format); streamFormat = s.format; statusEl.textContent = '切换中...'; statusEl.style.color = '#f1c40f'; } return; }
       // 性能统计
       if (isMobile) { const u = statsEl.getAttribute('data-user') || '', p = matchMedia('(orientation:portrait)').matches; statsEl.innerHTML = p ? `${u}&emsp;${s.fps}fps&emsp;${s.kb}KB` : `${u}<br>${s.fps}fps<br>${s.kb}KB`; }
       else { statsEl.innerHTML = `${s.w}×${s.h} Q${s.q} │ ${s.fps}fps │ ${s.enc_ms}ms │ ${s.kb}KB/f │ ${(s.kb * s.fps / 1024).toFixed(1)}MB/s`; }
@@ -162,7 +220,7 @@ function onMessage(event) {
   }
   // 二进制帧 → 路由到对应解码器
   if (streamFormat === 'h264' && typeof VideoDecoder !== 'undefined') { H264.feed(event.data); }
-  else { JPEG.feed(event.data); }
+  else { if (streamFormat === 'h264') { console.log('H264: VideoDecoder不可用!'); } JPEG.feed(event.data); }
 }
 connect();
 
@@ -184,7 +242,7 @@ if (!isMobile) {
   function buildDesktopResolutions(pw, ph) { const o = buildResolutions(pw, ph), c = maxwSelect.value; maxwSelect.innerHTML = ''; o.forEach(o => { const e = document.createElement('option'); e.value = o.value; e.textContent = o.label; maxwSelect.appendChild(e); }); maxwSelect.value = o.find(o => String(o.value) === c) ? c : '0'; }
   qualitySlider.oninput = () => { qualityVal.textContent = qualitySlider.value; }; qualitySlider.onchange = () => { currentQ = parseInt(qualitySlider.value); sendSettings(); }; maxwSelect.onchange = () => { currentMW = parseInt(maxwSelect.value); sendSettings(); }; select.onchange = () => { currentScreen = parseInt(select.value); currentMW = 0; send({ screen: currentScreen, maxw: 0 }); lastResKey = ''; };
   controlCheck.onchange = () => { send({ control: controlCheck.checked }); canvas.style.cursor = 'crosshair'; };
-  const h264Toggle = document.getElementById('use-h264'); if (h264Toggle) { h264Toggle.checked = useH264; h264Toggle.onchange = () => { useH264 = h264Toggle.checked; sendSettings(); setTimeout(connect, 100); }; }
+  const h264Toggle = document.getElementById('use-h264'); if (h264Toggle) { h264Toggle.checked = useH264; h264Toggle.onchange = () => { useH264 = h264Toggle.checked; resetDecoders(); statusEl.textContent = '切换中...'; statusEl.style.color = '#f1c40f'; sendSettings(); }; }
   let active = false, dragStart = null, dragging = false, lastMoveSent = 0;
   canvas.onmousedown = e => { if (!controlCheck.checked || e.target !== canvas) return; e.preventDefault(); if (e.button === 0) { active = true; const c = screenCoords(e); if (c.fx == null) return; dragStart = c; dragging = false; } };
   canvas.onmousemove = e => { if (!controlCheck.checked) return; if (!active || !dragStart) { const n = Date.now(); if (n - lastMoveSent < 30) return; lastMoveSent = n; const c = screenCoords(e); if (c.fx != null) send({ mx: c.fx, my: c.fy }); return; } const c = screenCoords(e); if (c.fx == null) return; if (Math.abs(c.fx - dragStart.fx) > 3 || Math.abs(c.fy - dragStart.fy) > 3) dragging = true; };

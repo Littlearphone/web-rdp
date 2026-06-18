@@ -198,8 +198,8 @@ func main() {
 	initHTTPClient(proxy)
 	if ffmpegArg == "" {
 		detectFFmpeg()
-		detectH264Encoder()
 	}
+	detectH264Encoder()
 
 	sub, _ := fs.Sub(staticFS, "static")
 	http.Handle("/", http.FileServer(http.FS(sub)))

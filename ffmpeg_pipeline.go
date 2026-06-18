@@ -14,11 +14,12 @@ import (
 // ═══════════════════════ 共享池 ═══════════════════════
 
 var (
-	ffPool   = make(map[int]*ffSession)
-	ffRefs   = make(map[int]int)
-	ffPoolQ  = make(map[int]int)
-	ffPoolMW = make(map[int]int)
-	ffPoolMu sync.Mutex
+	ffPool     = make(map[int]*ffSession)
+	ffRefs     = make(map[int]int)
+	ffPoolQ    = make(map[int]int)
+	ffPoolMW   = make(map[int]int)
+	ffPoolH264 = make(map[int]bool)
+	ffPoolMu   sync.Mutex
 )
 
 type ffSession struct {
@@ -41,7 +42,7 @@ func acquireFFmpeg(id, quality, maxW int, h264 bool) *ffSession {
 	ffPoolMu.Lock()
 	defer ffPoolMu.Unlock()
 	s, ok := ffPool[id]
-	if ok && ffPoolQ[id] == quality && ffPoolMW[id] == maxW {
+	if ok && ffPoolQ[id] == quality && ffPoolMW[id] == maxW && ffPoolH264[id] == h264 {
 		ffRefs[id]++
 		return s
 	}
@@ -56,6 +57,7 @@ func acquireFFmpeg(id, quality, maxW int, h264 bool) *ffSession {
 		ffRefs[id] = 1
 		ffPoolQ[id] = quality
 		ffPoolMW[id] = maxW
+		ffPoolH264[id] = h264
 	}
 	return s
 }
@@ -69,6 +71,9 @@ func releaseFFmpeg(id int) {
 			s.stop()
 			delete(ffPool, id)
 			delete(ffRefs, id)
+			delete(ffPoolQ, id)
+			delete(ffPoolMW, id)
+			delete(ffPoolH264, id)
 		}
 	}
 }
@@ -132,7 +137,7 @@ func startFFmpeg(id, quality, maxW int, h264 bool) *ffSession {
 	ff := &ffSession{
 		cmd:     cmd,
 		stdout:  bufio.NewReaderSize(stdout, 256*1024),
-		frameCh: make(chan []byte, 1),
+		frameCh: make(chan []byte, 16),
 		stopCh:  make(chan struct{}),
 	}
 
@@ -158,10 +163,27 @@ func h264Args(device string, cx, cy, cw, ch int, vf string) []string {
 		"-i", "desktop",
 		"-vf", vf,
 		"-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-		"-crf", "28", "-g", "120",
+		"-crf", "28", "-g", "120", "-x264opts", "slices=1:threads=1",
 		"-f", "h264", "-flush_packets", "1",
 		"pipe:1",
 	}
+}
+
+// findStartCode 在 data[start:] 中查找 H.264 起始码
+// 支持 3 字节 (0x00 0x00 0x01) 和 4 字节 (0x00 0x00 0x00 0x01)
+// 返回 (位置, 长度)，未找到返回 (-1, 0)
+func findStartCode(data []byte, start int) (int, int) {
+	for i := start; i < len(data)-1; i++ {
+		if data[i] == 0 && data[i+1] == 0 {
+			if i+2 < len(data) && data[i+2] == 1 {
+				return i, 3
+			}
+			if i+3 < len(data) && data[i+2] == 0 && data[i+3] == 1 {
+				return i, 4
+			}
+		}
+	}
+	return -1, 0
 }
 
 func h264Reader(ff *ffSession) {
@@ -180,27 +202,25 @@ func h264Reader(ff *ffSession) {
 		}
 		nalBuf = append(nalBuf, raw[:n]...)
 
-		for len(nalBuf) > 4 {
-			idx := 4
-			for idx < len(nalBuf)-3 {
-				if nalBuf[idx] == 0 && nalBuf[idx+1] == 0 &&
-					nalBuf[idx+2] == 0 && nalBuf[idx+3] == 1 {
-					break
-				}
-				idx++
+		for len(nalBuf) > 3 {
+			// 找到第一个起始码
+			firstSC, firstLen := findStartCode(nalBuf, 0)
+			if firstSC < 0 {
+				break // 缓冲区里没有起始码，等更多数据
 			}
-			if idx >= len(nalBuf)-3 {
-				break
+			if firstSC > 0 {
+				nalBuf = nalBuf[firstSC:] // 丢弃起始码前的无效字节
+				continue
 			}
-			frame := make([]byte, idx)
-			copy(frame, nalBuf[:idx])
-			select {
-			case ff.frameCh <- frame:
-			default:
-				<-ff.frameCh
-				ff.frameCh <- frame
+			// nalBuf 现在以起始码开头，找下一个起始码
+			nextSC, _ := findStartCode(nalBuf, firstLen)
+			if nextSC < 0 {
+				break // 还没收到完整的 NAL，等更多数据
 			}
-			nalBuf = nalBuf[idx:]
+			frame := make([]byte, nextSC)
+			copy(frame, nalBuf[:nextSC])
+			ff.frameCh <- frame // H.264 阻塞发送，不丢帧（SPS/PPS 不可丢失）
+			nalBuf = nalBuf[nextSC:]
 		}
 	}
 }

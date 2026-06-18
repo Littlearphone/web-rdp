@@ -19,6 +19,11 @@ import (
 	"github.com/kbinani/screenshot"
 )
 
+type wsMessage struct {
+	msgType int
+	data    []byte
+}
+
 var (
 	userCounter atomic.Int32
 	userMap     = make(map[string]string)
@@ -38,7 +43,7 @@ func userNameFor(ip string) string {
 
 func handleWS(conn *websocket.Conn, r *http.Request) {
 	var ff *ffSession
-	useH264 := false // 默认 MJPEG
+	var useH264 atomic.Bool // 默认 MJPEG，原子操作避免 data race
 	var curScreen int = -1
 	ip := r.RemoteAddr
 	if idx := strings.LastIndex(ip, ":"); idx != -1 {
@@ -55,7 +60,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 
 	// ── 发送用户名 + 编码格式 ──
 	format := "jpeg"
-	if useH264 {
+	if useH264.Load() {
 		format = "h264"
 	}
 	if b, _ := json.Marshal(map[string]string{"user": userName, "format": format}); b != nil {
@@ -98,7 +103,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 					_, _, _ = procSetCursorPos.Call(uintptr(*cm.MX), uintptr(*cm.MY))
 				}
 				if cm.Webcodecs != nil {
-					useH264 = *cm.Webcodecs && h264Encoder != ""
+					useH264.Store(*cm.Webcodecs && h264Encoder != "")
 				}
 				if cm.Control != nil {
 					if *cm.Control {
@@ -135,19 +140,13 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 		cachedBounds image.Rectangle
 		cachedZoom   float64
 		cacheFrame   int
-		sendCh       = make(chan []byte, 3)
-		statCh       = make(chan []byte, 1)
+		outCh        = make(chan wsMessage, 256) // 大缓冲 + H.264 阻塞发送避免丢帧
 	)
 
-	// 发送 goroutine（单写 WebSocket）
+	// 发送 goroutine（单写 WebSocket，单通道保证顺序）
 	go func() {
-		for {
-			select {
-			case msg := <-sendCh:
-				_ = conn.WriteMessage(websocket.BinaryMessage, msg)
-			case s := <-statCh:
-				_ = conn.WriteMessage(websocket.TextMessage, s)
-			}
+		for msg := range outCh {
+			_ = conn.WriteMessage(msg.msgType, msg.data)
 		}
 	}()
 
@@ -161,11 +160,12 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 
 		if useFFmpeg {
 			// ── ffmpeg 路径 ──
-			if ff == nil || ffScreen != id || ffQ != q || ffMW != mw || ffH264 != useH264 {
+			h264 := useH264.Load()
+			if ff == nil || ffScreen != id || ffQ != q || ffMW != mw || ffH264 != h264 {
 				if ff != nil {
 					releaseFFmpeg(curScreen)
 				}
-				ff = acquireFFmpeg(id, q, mw, useH264)
+				ff = acquireFFmpeg(id, q, mw, h264)
 				if ff == nil {
 					log.Printf("ffmpeg 启动失败")
 					time.Sleep(time.Second)
@@ -175,19 +175,15 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				curScreen = id
 				ffQ = q
 				ffMW = mw
-				ffH264 = useH264
+				ffH264 = h264
 				cacheFrame = 0
 				f := "jpeg"
 				if ffH264 {
 					f = "h264"
 				}
+				log.Printf("编码格式切换 → %s", f)
 				if b, _ := json.Marshal(map[string]string{"format": f}); b != nil {
-					select {
-					case statCh <- b:
-					default:
-						{
-						}
-					}
+					outCh <- wsMessage{websocket.TextMessage, b}
 				}
 			}
 
@@ -229,14 +225,16 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			cacheFrame--
 
 			// MJPEG 需要 24B 头，H.264 裸发
-			if !useH264 {
+			if !ffH264 {
 				data = encodeFrame(int32(cachedBounds.Min.X), int32(cachedBounds.Min.Y),
 					int32(cachedBounds.Dx()), int32(cachedBounds.Dy()), cachedZoom, data)
 			}
-			select {
-			case sendCh <- data:
-			default:
-				{
+			if ffH264 {
+				outCh <- wsMessage{websocket.BinaryMessage, data} // H.264 阻塞：参考帧不丢
+			} else {
+				select {
+				case outCh <- wsMessage{websocket.BinaryMessage, data}:
+				default:
 				}
 			}
 
@@ -253,7 +251,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				}
 				if b, _ := json.Marshal(stat); b != nil {
 					select {
-					case statCh <- b:
+					case outCh <- wsMessage{websocket.TextMessage, b}:
 					default:
 						{
 						}
@@ -282,7 +280,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 		msg := encodeFrame(int32(cachedBounds.Min.X), int32(cachedBounds.Min.Y),
 			int32(cachedBounds.Dx()), int32(cachedBounds.Dy()), cachedZoom, goJpgBuf.Bytes())
 		select {
-		case sendCh <- msg:
+		case outCh <- wsMessage{websocket.BinaryMessage, msg}:
 		default:
 			{
 			}
@@ -311,7 +309,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			}
 			if b, _ := json.Marshal(stat); b != nil {
 				select {
-				case statCh <- b:
+				case outCh <- wsMessage{websocket.TextMessage, b}:
 				default:
 					{
 					}
