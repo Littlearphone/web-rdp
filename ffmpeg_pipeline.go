@@ -296,7 +296,7 @@ func h264Args(useDDAGrab bool, id, refreshRate, cx, cy, cw, ch int, vf string, q
 	case "h264_qsv":
 		// Intel Quick Sync：look_ahead=0 关闭前瞻减少延迟
 		base = append(base, "-c:v", "h264_qsv", "-preset", "veryfast", "-look_ahead", "0",
-			"-g", "120", "-global_quality", hqs)
+			"-async_depth", "1", "-g", "120", "-global_quality", hqs)
 	case "libx264":
 		// CPU 软件编码回退：ultrafast + zerolatency + 单 slice
 		base = append(base, "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
@@ -305,7 +305,7 @@ func h264Args(useDDAGrab bool, id, refreshRate, cx, cy, cw, ch int, vf string, q
 		// 编码器列表已耗尽（currentH264Encoder() 返回 ""），无可用的 H.264 编码器
 		return nil
 	}
-	base = append(base, "-f", "h264", "-flush_packets", "1", "pipe:1")
+	base = append(base, "-bsf:v", "h264_metadata=aud=insert", "-f", "h264", "-flush_packets", "1", "pipe:1")
 	return base
 }
 
@@ -327,11 +327,36 @@ func findStartCode(data []byte, start int) (int, int) {
 }
 
 // h264Reader 持续从 ffmpeg stdout 读取 H.264 Annex B 原始流，
-// 按起始码切分 NAL 单元并通过 frameCh 发送。遇到读取错误时通知主循环回退。
+// 按 AUD (Access Unit Delimiter) 帧边界将 NAL 打包为完整编码帧，
+// 通过 frameCh 发送。每帧含 AUD + SPS/PPS/SEI + Slice 全部 NAL，
+// 前端一次 WebSocket 消息即可完整解码，消除 NAL 碎片化延迟。
+// 遇到读取错误时通知主循环回退。
 func h264Reader(ff *ffSession) {
 	raw := make([]byte, 64*1024)
 	nalBuf := make([]byte, 0, 256*1024)
-	sentFrames := false // 是否曾成功发送帧（用于判断 ffmpeg 是否异常退出）
+	sentFrames := false
+
+	// batch 累积同一编码帧的所有 NAL 单元，AUD 为帧边界
+	var batch [][]byte
+
+	flushBatch := func() {
+		if len(batch) == 0 {
+			return
+		}
+		total := 0
+		for _, nal := range batch {
+			total += len(nal)
+		}
+		frame := make([]byte, total)
+		off := 0
+		for _, nal := range batch {
+			copy(frame[off:], nal)
+			off += len(nal)
+		}
+		ff.frameCh <- frame
+		sentFrames = true
+		batch = batch[:0]
+	}
 
 	for {
 		select {
@@ -341,12 +366,10 @@ func h264Reader(ff *ffSession) {
 		}
 		n, err := ff.stdout.Read(raw)
 		if err != nil {
-			// ffmpeg 进程退出（驱动不支持、参数错误等）
-			// 打印 stderr 以诊断编码器/滤镜失败原因
 			if ff.stderrBuf.Len() > 0 {
 				log.Printf("ffmpeg stderr: %s", string(ff.stderrBuf.Bytes()))
 			}
-			// 如果未发送任何帧，通知主循环即时回退，无需等 5 秒超时
+			flushBatch() // 发送最后的不完整帧
 			if !sentFrames {
 				select {
 				case ff.frameCh <- nil:
@@ -370,10 +393,15 @@ func h264Reader(ff *ffSession) {
 			if nextSC < 0 {
 				break
 			}
-			frame := make([]byte, nextSC)
-			copy(frame, nalBuf[:nextSC])
-			ff.frameCh <- frame
-			sentFrames = true
+			nal := make([]byte, nextSC)
+			copy(nal, nalBuf[:nextSC])
+
+			// AUD (NAL type 9) 标记新帧开始，此前累积的 NAL 属于上一帧
+			if nal[firstLen]&0x1F == 9 {
+				flushBatch()
+			}
+			batch = append(batch, nal)
+
 			nalBuf = nalBuf[nextSC:]
 		}
 	}
@@ -407,6 +435,7 @@ func mjpegArgs(useDDAGrab bool, id, refreshRate, cx, cy, cw, ch int, vf string, 
 		"-vf", vf,
 		"-c:v", "mjpeg", "-q:v", strconv.Itoa(ffQ),
 		"-huffman", "default",
+		"-flush_packets", "1",
 		"-f", "image2pipe", "pipe:1",
 	)
 	return args

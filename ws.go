@@ -327,20 +327,8 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				}
 			}
 
-			// 仅计数真实编码帧：MJPEG 每帧一个；H.264 跳过 AUD/SEI/SPS/PPS
-			isFrame := true
-			if useH264.Load() && len(data) > 4 {
-				// data 以 Annex B 起始码开头（3B: 00 00 01 或 4B: 00 00 00 01）
-				// NAL header 在起始码之后，低 5 位是 NAL unit type
-				if data[2] == 1 {
-					isFrame = (data[3]&0x1F) == 1 || (data[3]&0x1F) == 5 // 3 字节起始码
-				} else if data[2] == 0 && data[3] == 1 {
-					isFrame = (data[4]&0x1F) == 1 || (data[4]&0x1F) == 5 // 4 字节起始码
-				}
-			}
-			if isFrame {
-				frames++
-			}
+			// 帧计数：H.264 已按 AUD 帧边界打包，每消息即一帧；MJPEG 同理
+			frames++
 			if elapsed := time.Since(lastStats); elapsed >= time.Second {
 				fps := float64(frames) / elapsed.Seconds()
 				maxW := float64(maxWait.Microseconds()) / 1000
