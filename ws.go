@@ -78,7 +78,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 	}
 
 	// ── 输出通道（提前创建，供 reader goroutine 发送状态消息）──
-	outCh := make(chan wsMessage, 256)
+	outCh := make(chan wsMessage, 4)
 
 	// 发送 goroutine（单写 WebSocket，单通道保证顺序）
 	go func() {
