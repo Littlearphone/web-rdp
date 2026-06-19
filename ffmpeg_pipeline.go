@@ -156,6 +156,11 @@ func startFFmpeg(id, quality, maxW, fps int, h264 bool) *ffSession {
 					refreshRate = capFPS
 				}
 			}
+			// MJPEG: cap auto framerate at 60fps. JPEG has no inter-frame
+			// compression; higher rates waste bandwidth and overwhelm the client.
+			if !h264 && refreshRate > 60 {
+				refreshRate = 60
+			}
 			if refreshRate < 60 {
 				refreshRate = 60
 			}

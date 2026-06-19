@@ -11,3 +11,4 @@ static/
 # Go 构建产物
 *.exe
 web-rdp
+/ffmpeg_local/

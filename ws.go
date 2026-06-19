@@ -329,9 +329,20 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 		}
 
 		// ── 纯 Go 回退 ──
+		// 主动限速：MJPEG 模式下无 ffmpeg 帧率控制，限制采集速率
+		// 避免全速运行导致带宽暴涨、前端解码积压
+		targetInterval := time.Second / 60
+		if !lastFrame.IsZero() {
+			if d := targetInterval - time.Since(lastFrame); d > 0 {
+				time.Sleep(d)
+			}
+		}
+		loopStart := time.Now()
+
 		img, err := screenshot.CaptureDisplay(id)
 		if err != nil {
 			time.Sleep(100 * time.Millisecond)
+			lastFrame = time.Time{}
 			continue
 		}
 		if cacheFrame <= 0 {
@@ -347,22 +358,18 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			int32(cachedBounds.Dx()), int32(cachedBounds.Dy()), cachedZoom, goJpgBuf.Bytes())
 		select {
 		case outCh <- wsMessage{websocket.BinaryMessage, msg}:
+			frames++
 		default:
-			{
-			}
 		}
 
-		now := time.Now()
-		if !lastFrame.IsZero() {
-			w := now.Sub(lastFrame)
-			totalWait += w
-			if w > maxWait {
-				maxWait = w
-			}
+		// 统计本迭代耗时（含采集+缩放+编码）
+		iterDuration := time.Since(loopStart)
+		totalWait += iterDuration
+		if iterDuration > maxWait {
+			maxWait = iterDuration
 		}
-		lastFrame = now
+		lastFrame = loopStart
 
-		frames++
 		if elapsed := time.Since(lastStats); elapsed >= time.Second {
 			fps := float64(frames) / elapsed.Seconds()
 			maxW := float64(maxWait.Microseconds()) / 1000

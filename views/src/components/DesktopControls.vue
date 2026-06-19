@@ -26,8 +26,8 @@
 
     <span class="sep">|</span>
 
-    <!-- 帧率选择（ddagrab 模式） -->
-    <template v-if="store.statsMaxRate > 0">
+    <!-- 帧率选择（仅 H.264 ddagrab 模式） -->
+    <template v-if="store.streamFormat === 'h264' && store.statsMaxRate > 0">
       <span class="label">帧率</span>
       <n-select
         v-model:value="store.currentFPS"
