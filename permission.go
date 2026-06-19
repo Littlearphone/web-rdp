@@ -37,12 +37,27 @@ var (
 	_sendMsg       = _u32.NewProc("SendMessageW")
 	_loadIco       = _u32.NewProc("LoadIconW")
 	_getClientRect = _u32.NewProc("GetClientRect")
+	_getDC         = _u32.NewProc("GetDC")
+	_relDC         = _u32.NewProc("ReleaseDC")
+	_createIco     = _u32.NewProc("CreateIconIndirect")
 
-	_creatFont = _g32.NewProc("CreateFontW")
-	_createBrs = _g32.NewProc("CreateSolidBrush")
-	_setBkMode = _g32.NewProc("SetBkMode")
-	_setTxtCol = _g32.NewProc("SetTextColor")
-	_fillRect  = _u32.NewProc("FillRect")
+	_creatFont   = _g32.NewProc("CreateFontW")
+	_createBrs   = _g32.NewProc("CreateSolidBrush")
+	_setBkMode   = _g32.NewProc("SetBkMode")
+	_setTxtCol   = _g32.NewProc("SetTextColor")
+	_fillRect    = _u32.NewProc("FillRect")
+	_createDC    = _g32.NewProc("CreateCompatibleDC")
+	_createBmp   = _g32.NewProc("CreateCompatibleBitmap")
+	_selectObj   = _g32.NewProc("SelectObject")
+	_deleteDC    = _g32.NewProc("DeleteDC")
+	_deleteObj   = _g32.NewProc("DeleteObject")
+	_setPixel    = _g32.NewProc("SetPixel")
+	_roundRect   = _g32.NewProc("RoundRect")
+	_createPen   = _g32.NewProc("CreatePen")
+	_createSldBr = _g32.NewProc("CreateSolidBrush")
+	_rect        = _g32.NewProc("Rectangle")
+	_moveTo      = _g32.NewProc("MoveToEx")
+	_lineTo      = _g32.NewProc("LineTo")
 )
 
 // ═══════════════════════════ 常量 ═══════════════════════════
@@ -69,7 +84,6 @@ const (
 	WM_CLOSE          = 0x0010
 	HTCAPTION         = 2
 	TRANSPARENT       = 1
-	IDI_INFORMATION   = 32516
 	STM_SETICON       = 0x0170
 	BM_GETCHECK       = 0x00F0
 
@@ -127,6 +141,97 @@ func _rgb(r, g, b uint8) uintptr {
 	return uintptr(uint32(r) | uint32(g)<<8 | uint32(b)<<16)
 }
 
+// iconInfo 对应 Windows ICONINFO 结构体
+type iconInfo struct {
+	fIcon    int32
+	xHotspot uint32
+	yHotspot uint32
+	hbmMask  uintptr
+	hbmColor uintptr
+}
+
+// drawMonitorIcon 用 GDI 绘制一个 48×48 的显示器图标，完全嵌入可执行文件。
+// 背景色与弹窗背景一致（#202020），整体协调不突兀。
+func drawMonitorIcon() uintptr {
+	hdc, _, _ := _getDC.Call(0)
+	if hdc == 0 {
+		return 0
+	}
+	defer _relDC.Call(0, hdc)
+
+	memDC, _, _ := _createDC.Call(hdc)
+	if memDC == 0 {
+		return 0
+	}
+	defer _deleteDC.Call(memDC)
+
+	hBmp, _, _ := _createBmp.Call(hdc, 48, 48)
+	if hBmp == 0 {
+		return 0
+	}
+	defer _deleteObj.Call(hBmp)
+
+	oldBmp, _, _ := _selectObj.Call(memDC, hBmp)
+	defer _selectObj.Call(memDC, oldBmp)
+
+	// 背景与弹窗一致 #202020
+	bgBr, _, _ := _createSldBr.Call(_rgb(0x20, 0x20, 0x20))
+	defer _deleteObj.Call(bgBr)
+	var fullRC struct{ L, T, R, B int32 }
+	fullRC.R, fullRC.B = 48, 48
+	_fillRect.Call(memDC, uintptr(unsafe.Pointer(&fullRC)), bgBr)
+
+	// 显示器外框
+	bezelPen, _, _ := _createPen.Call(0, 3, _rgb(0x66, 0x66, 0x66))
+	defer _deleteObj.Call(bezelPen)
+	bezelBr, _, _ := _createSldBr.Call(_rgb(0x40, 0x40, 0x40))
+	defer _deleteObj.Call(bezelBr)
+	oldPen, _, _ := _selectObj.Call(memDC, bezelPen)
+	oldBr, _, _ := _selectObj.Call(memDC, bezelBr)
+	_roundRect.Call(memDC, 5, 2, 43, 33, 6, 6)
+	_roundRect.Call(memDC, 8, 5, 40, 30, 4, 4)
+	_selectObj.Call(memDC, oldPen)
+	_selectObj.Call(memDC, oldBr)
+
+	// 屏幕区域
+	screenBr, _, _ := _createSldBr.Call(_rgb(0x1A, 0x3A, 0x50))
+	defer _deleteObj.Call(screenBr)
+	var scrRC struct{ L, T, R, B int32 }
+	scrRC.L, scrRC.T, scrRC.R, scrRC.B = 10, 7, 38, 28
+	_fillRect.Call(memDC, uintptr(unsafe.Pointer(&scrRC)), screenBr)
+
+	// 屏幕高光
+	hlPen, _, _ := _createPen.Call(0, 1, _rgb(0x60, 0x80, 0x99))
+	defer _deleteObj.Call(hlPen)
+	_, _, _ = _selectObj.Call(memDC, hlPen)
+	for y := int32(9); y <= 13; y += 2 {
+		_moveTo.Call(memDC, 12, uintptr(y))
+		_lineTo.Call(memDC, 36, uintptr(y))
+	}
+	_selectObj.Call(memDC, oldPen)
+
+	// 支架
+	standPen, _, _ := _createPen.Call(0, 2, _rgb(0x66, 0x66, 0x66))
+	defer _deleteObj.Call(standPen)
+	_, _, _ = _selectObj.Call(memDC, standPen)
+	_moveTo.Call(memDC, 24, 33)
+	_lineTo.Call(memDC, 24, 41)
+	_moveTo.Call(memDC, 16, 41)
+	_lineTo.Call(memDC, 32, 41)
+	_selectObj.Call(memDC, oldPen)
+
+	// AND 掩码全零 = 完全不透明
+	hMask, _, _ := _createBmp.Call(hdc, 48, 48)
+	defer _deleteObj.Call(hMask)
+
+	var ii iconInfo
+	ii.fIcon = 1
+	ii.hbmColor = hBmp
+	ii.hbmMask = hMask
+	hIcon, _, _ := _createIco.Call(uintptr(unsafe.Pointer(&ii)))
+	return hIcon
+}
+
 // ═══════════════════════════ GDI 初始化 ═══════════════════════════
 
 func _permGdiInit() {
@@ -136,7 +241,7 @@ func _permGdiInit() {
 	_permFBig, _, _ = _creatFont.Call(24, 0, 0, 0, 700, 0, 0, 0, 1, 0, 0, 5, 2|4, uintptr(unsafe.Pointer(_u16("Microsoft YaHei UI"))))
 	_permFMid, _, _ = _creatFont.Call(20, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 2|4, uintptr(unsafe.Pointer(_u16("Microsoft YaHei UI"))))
 	_permFSml, _, _ = _creatFont.Call(18, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 2|4, uintptr(unsafe.Pointer(_u16("Microsoft YaHei UI"))))
-	_permIco, _, _ = _loadIco.Call(0, uintptr(IDI_INFORMATION))
+	_permIco = drawMonitorIcon()
 	_permBgBr, _, _ = _createBrs.Call(_rgb(_bgR, _bgG, _bgB))
 }
 
@@ -312,8 +417,8 @@ func runDarkDialog(header, body string, buttons []permBtn,
 		onCreated(hwnd)
 	}
 
-	// 图标 (同 dlgcheck.go)
-	ic := _permCtl(hwnd, "STATIC", "", SS_ICON, 0, 48, 32, 28, 28)
+	// 图标（大尺寸，从 mstsc.exe 提取）
+	ic := _permCtl(hwnd, "STATIC", "", SS_ICON, 0, 40, 28, 48, 48)
 	_, _, _ = _sendMsg.Call(ic, STM_SETICON, _permIco, 0)
 
 	// 标题 — 大字体
@@ -428,7 +533,7 @@ func showControlRequestDialog(userName string) (int, bool) {
 		{BTN_DENY, "拒绝", false},
 	}
 
-	header := fmt.Sprintf("用户「%s」请求远程控制权限", userName)
+	header := fmt.Sprintf("「%s」请求远程控制权限", userName)
 	body := "请选择允许或拒绝此请求。\n勾选【记住我的选择】可将本次选择设为永久规则。"
 
 	// 注册 HWND，确保 closeActiveDialog() 可以在客户端断开时关闭此弹窗
@@ -468,7 +573,7 @@ func showActiveControlDialog(userName string) {
 		{BTN_DISCONNECT, "断开控制", true},
 	}
 
-	header := fmt.Sprintf("用户「%s」正在控制此电脑", userName)
+	header := fmt.Sprintf("「%s」正在控制此电脑", userName)
 	body := "点击「断开控制」可立即终止此用户的控制权限。"
 
 	btn, _ := runDarkDialog(header, body, buttons, false,

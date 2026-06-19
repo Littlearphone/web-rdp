@@ -111,11 +111,35 @@
       >{{ statusText }}</span>
     </span>
   </div>
+
+  <!-- 修改用户名弹窗（风格与进入页面的弹窗一致） -->
+  <n-modal
+    :show="showEditNameDialog"
+    :mask-closable="false"
+    @update:show="(v: boolean) => { if (!v) showEditNameDialog = false; }"
+    transform-origin="center"
+  >
+    <div class="name-dialog">
+      <h3 class="name-dialog-title">修改用户名</h3>
+      <p class="name-dialog-body">在远程桌面上显示的名称，其他用户可见</p>
+      <n-input
+        ref="editNameInputRef"
+        v-model:value="editTempName"
+        size="large"
+        placeholder="输入用户名"
+        @keyup.enter="onConfirmEditUser"
+      />
+      <div class="name-dialog-actions">
+        <n-button size="medium" quaternary @click="showEditNameDialog = false">取消</n-button>
+        <n-button type="primary" size="medium" @click="onConfirmEditUser">确认</n-button>
+      </div>
+    </div>
+  </n-modal>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue';
-import { NSelect, NSlider, NSwitch, NTooltip, useNotification } from 'naive-ui';
+import { ref, computed, watch, nextTick } from 'vue';
+import { NSelect, NSlider, NSwitch, NTooltip, NModal, NInput, NButton, useNotification } from 'naive-ui';
 import { useAppStore } from '@/stores/app';
 import { buildResolutions, buildFPSOptions } from '@/composables/useResolutionOptions';
 import { useWebSocket } from '@/composables/useWebSocket';
@@ -243,11 +267,24 @@ function onH264Toggle(v: boolean) {
   store.sendSettings();
 }
 
+const showEditNameDialog = ref(false);
+const editTempName = ref('');
+const editNameInputRef = ref<InstanceType<typeof NInput> | null>(null);
+
 function onEditUser() {
-  const name = prompt('输入新用户名', store.statsUser);
-  if (name && name.trim() && name.trim() !== store.statsUser) {
-    store.send({ user: name.trim() });
+  editTempName.value = store.statsUser;
+  showEditNameDialog.value = true;
+  nextTick(() => editNameInputRef.value?.focus());
+}
+
+function onConfirmEditUser() {
+  const name = editTempName.value.trim();
+  if (!name || name === store.statsUser) {
+    showEditNameDialog.value = false;
+    return;
   }
+  store.send({ user: name });
+  showEditNameDialog.value = false;
 }
 
 const statusText = computed(() => {

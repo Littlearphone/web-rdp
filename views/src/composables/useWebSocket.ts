@@ -115,7 +115,10 @@ export function useWebSocket() {
   // 连接 / 重连
   // ═══════════════════════════════════════════
 
-  function connect() {
+  let savedUser = '';
+
+  function connect(user?: string) {
+    if (user) savedUser = user;
     // 关闭旧连接
     if (store.ws) {
       store.ws.onclose = null;
@@ -130,7 +133,8 @@ export function useWebSocket() {
     store.streamFormat = (store.useH264 && store.canH264) ? 'h264' : 'jpeg';
 
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const wsUrl = `${proto}://${store.serverAddr}/ws`;
+    let wsUrl = `${proto}://${store.serverAddr}/ws`;
+    if (savedUser) wsUrl += `?user=${encodeURIComponent(savedUser)}`;
     const wsInst = new WebSocket(wsUrl);
     wsInst.binaryType = 'arraybuffer';
 
@@ -190,11 +194,11 @@ export function useWebSocket() {
   // 初始化
   // ═══════════════════════════════════════════
 
-  function init() {
+  function init(user: string) {
     store.isMobile =
       /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) &&
       window.innerWidth <= 900;
-    connect();
+    connect(user);
   }
 
   return { connect, manualReconnect, init };

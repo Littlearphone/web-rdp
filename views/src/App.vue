@@ -3,10 +3,10 @@
     <n-notification-provider>
     <div id="main">
       <!-- 桌面端顶栏 -->
-      <DesktopControls v-if="!store.isMobile" />
+      <DesktopControls v-if="!store.isMobile && !showNameDialog" />
 
       <!-- 移动端控件（竖屏底部 / 横屏侧边） -->
-      <template v-if="store.isMobile">
+      <template v-if="store.isMobile && !showNameDialog">
         <div id="view">
           <ScreenCanvas />
         </div>
@@ -14,7 +14,7 @@
       </template>
 
       <!-- 桌面端布局：控件在上，canvas 在下 -->
-      <template v-else>
+      <template v-else-if="!showNameDialog">
         <div id="view">
           <ScreenCanvas />
         </div>
@@ -22,14 +22,39 @@
     </div>
 
     <!-- 重连覆盖层（固定定位） -->
-    <ConnectionOverlay />
+    <ConnectionOverlay v-if="!showNameDialog" />
+
+    <!-- 用户名设置弹窗（连接前必填）—— 风格与 Win32 深色弹窗一致 -->
+    <n-modal
+      :show="showNameDialog"
+      :mask-closable="false"
+      :closable="false"
+      transform-origin="center"
+    >
+      <div class="name-dialog">
+        <h3 class="name-dialog-title">设置用户名</h3>
+        <p class="name-dialog-body">在远程桌面上显示的名称，其他用户可见</p>
+        <n-input
+          ref="nameInputRef"
+          v-model:value="tempName"
+          size="large"
+          placeholder="输入用户名"
+          @keyup.enter="onConfirmName"
+        />
+        <div class="name-dialog-actions">
+          <n-button type="primary" size="medium" @click="onConfirmName">
+            进入
+          </n-button>
+        </div>
+      </div>
+    </n-modal>
     </n-notification-provider>
   </n-config-provider>
 </template>
 
 <script setup lang="ts">
-import { onMounted } from 'vue';
-import { darkTheme, zhCN, NConfigProvider, NNotificationProvider } from 'naive-ui';
+import { ref, onMounted, nextTick } from 'vue';
+import { darkTheme, zhCN, NConfigProvider, NNotificationProvider, NModal, NInput, NButton } from 'naive-ui';
 import { useAppStore } from '@/stores/app';
 import { useWebSocket } from '@/composables/useWebSocket';
 import { useKeyboardCapture } from '@/composables/useKeyboardCapture';
@@ -46,8 +71,22 @@ if (!store.isMobile) {
   useKeyboardCapture();
 }
 
-onMounted(() => {
-  init();
+// ── 用户名弹窗 ──
+const showNameDialog = ref(true);
+const tempName = ref('用户' + Math.floor(1000 + Math.random() * 9000));
+const nameInputRef = ref<InstanceType<typeof NInput> | null>(null);
+
+function onConfirmName() {
+  const name = tempName.value.trim();
+  if (!name) return;
+  showNameDialog.value = false;
+  init(name);
+}
+
+onMounted(async () => {
+  // 自动聚焦输入框
+  await nextTick();
+  nameInputRef.value?.focus();
 });
 </script>
 
@@ -87,5 +126,33 @@ body {
   align-items: center;
   justify-content: center;
   overflow: hidden;
+}
+
+.name-dialog {
+  background: #202020;
+  padding: 28px 36px 24px;
+  border-radius: 4px;
+  width: 420px;
+  max-width: 90vw;
+  font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+}
+
+.name-dialog-title {
+  margin: 0 0 4px 0;
+  color: #e0e0e0;
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.name-dialog-body {
+  margin: 0 0 20px 0;
+  color: #999;
+  font-size: 16px;
+  font-weight: 400;
+}
+
+.name-dialog-actions {
+  margin-top: 20px;
+  text-align: right;
 }
 </style>

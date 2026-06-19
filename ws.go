@@ -58,7 +58,15 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 	if idx := strings.LastIndex(ip, ":"); idx != -1 {
 		ip = ip[:idx]
 	}
-	userName := userNameFor(ip)
+	// 优先使用客户端指定的用户名（?user=XXX），否则按 IP 自动分配
+	userName := strings.TrimSpace(r.URL.Query().Get("user"))
+	if userName != "" {
+		userMapMu.Lock()
+		userMap[ip] = userName
+		userMapMu.Unlock()
+	} else {
+		userName = userNameFor(ip)
+	}
 	connCount.Add(1)
 	log.Printf("[%s] 已连接 (%s)  在线 %d 人", userName, ip, connCount.Load())
 
