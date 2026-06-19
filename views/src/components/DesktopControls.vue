@@ -48,20 +48,21 @@
       {{ controlTitle }}
     </n-tooltip>
 
-    <span class="sep">|</span>
+    <template v-if="store.canH264">
+      <span class="sep">|</span>
 
-    <n-switch
-      v-model:value="store.useH264"
-      :disabled="!store.canH264"
-      size="small"
-      @update:value="onH264Toggle"
-    />
-    <n-tooltip trigger="hover">
-      <template #trigger>
-        <span class="label">节流模式</span>
-      </template>
-      开启：GPU 硬件编码，流量低延迟小<br>关闭：兼容模式，纯软件编码
-    </n-tooltip>
+      <n-switch
+        v-model:value="store.useH264"
+        size="small"
+        @update:value="onH264Toggle"
+      />
+      <n-tooltip trigger="hover">
+        <template #trigger>
+          <span class="label">节流模式</span>
+        </template>
+        开启：GPU 硬件编码，流量低延迟小<br>关闭：兼容模式，纯软件编码
+      </n-tooltip>
+    </template>
 
     <span class="sep">|</span>
 
