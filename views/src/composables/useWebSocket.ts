@@ -115,7 +115,8 @@ export function useWebSocket() {
     store.connectionStatus = 'connecting';
     store.streamFormat = (store.useH264 && store.canH264) ? 'h264' : 'jpeg';
 
-    const wsUrl = `ws://${store.serverAddr}/ws`;
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const wsUrl = `${proto}://${store.serverAddr}/ws`;
     const wsInst = new WebSocket(wsUrl);
     wsInst.binaryType = 'arraybuffer';
 

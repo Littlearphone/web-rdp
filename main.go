@@ -1,11 +1,20 @@
 package main
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"embed"
+	"encoding/pem"
 	"flag"
 	"fmt"
 	"io/fs"
 	"log"
+	"math/big"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -214,18 +223,81 @@ func main() {
 		port      int    // 监听端口
 		listen    string // 监听地址
 		ffmpegArg string // 手动指定的 ffmpeg 路径
+		useTLS    bool   // 是否启用 HTTPS（自动生成自签名证书）
 	)
 	flag.StringVar(&proxy, "proxy", "", "HTTP 代理地址 (用于下载 ffmpeg)")
 	flag.IntVar(&port, "port", 9000, "监听端口")
 	flag.StringVar(&listen, "listen", "", "监听地址 (默认所有网卡)")
 	flag.StringVar(&ffmpegArg, "ffmpeg", "", "手动指定 ffmpeg.exe 路径")
+	flag.BoolVar(&useTLS, "tls", true, "启用 HTTPS，-tls=false 禁用（自签名证书，局域网 H.264 需要）")
 	flag.Usage = func() {
 		o := flag.CommandLine.Output()
 		fmt.Fprintf(o, "Web 远程控制 v1.0\n\n用法: %s [选项]\n\n选项:\n", os.Args[0])
 		flag.PrintDefaults()
-		fmt.Fprint(o, "\n示例:\n  web-rdp.exe                                    默认 :9000\n  web-rdp.exe -port 8080                          指定端口\n  web-rdp.exe -listen 127.0.0.1                   仅本机\n  web-rdp.exe -ffmpeg C:\\tools\\ffmpeg.exe         手动指定 ffmpeg\n  web-rdp.exe -proxy :7890                        走代理下载\n")
+		fmt.Fprint(o, "\n示例:\n  web-rdp.exe                                    默认 HTTPS :9000\n  web-rdp.exe -port 8080                          指定端口\n  web-rdp.exe -listen 127.0.0.1                   仅本机\n  web-rdp.exe -ffmpeg C:\\tools\\ffmpeg.exe         手动指定 ffmpeg\n  web-rdp.exe -proxy :7890                        走代理下载\n  web-rdp.exe -tls=false                          禁用 HTTPS，回退 HTTP\n")
 	}
 	flag.Parse()
+
+	// generateSelfSignedCert 生成一个自签名 ECDSA P-256 证书，SAN 包含主机名和本机 IP。
+	// 证书仅在内存中，每次启动重新生成，有效期为 365 天。
+	// 用于局域网 HTTPS 场景，使浏览器将页面视为 Secure Context，从而暴露 VideoDecoder API。
+	generateSelfSignedCert := func() tls.Certificate {
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			log.Fatalf("生成 ECDSA 密钥失败: %v", err)
+		}
+
+		notBefore := time.Now()
+		notAfter := notBefore.Add(365 * 24 * time.Hour)
+
+		serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+		if err != nil {
+			log.Fatalf("生成证书序列号失败: %v", err)
+		}
+
+		hostname, _ := os.Hostname()
+
+		// 收集本机非回环 IPv4 地址作为 SAN
+		var ips []net.IP
+		addrs, _ := net.InterfaceAddrs()
+		for _, a := range addrs {
+			if ipNet, ok := a.(*net.IPNet); ok && ipNet.IP.To4() != nil && !ipNet.IP.IsLoopback() {
+				ips = append(ips, ipNet.IP)
+			}
+		}
+
+		dnsNames := []string{hostname, "localhost"}
+		ips = append(ips, net.ParseIP("127.0.0.1"))
+
+		tmpl := &x509.Certificate{
+			SerialNumber: serial,
+			Subject:      pkix.Name{CommonName: hostname, Organization: []string{"web-rdp"}},
+			NotBefore:    notBefore,
+			NotAfter:     notAfter,
+			KeyUsage:     x509.KeyUsageDigitalSignature,
+			ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+			DNSNames:     dnsNames,
+			IPAddresses:  ips,
+		}
+
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+		if err != nil {
+			log.Fatalf("生成自签名证书失败: %v", err)
+		}
+
+		certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+		keyBytes, err := x509.MarshalECPrivateKey(key)
+		if err != nil {
+			log.Fatalf("序列化私钥失败: %v", err)
+		}
+		keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
+
+		cert, err := tls.X509KeyPair(certPEM, keyPEM)
+		if err != nil {
+			log.Fatalf("加载证书失败: %v", err)
+		}
+		return cert
+	}
 
 	if ffmpegArg != "" {
 		ffmpegPath = ffmpegArg
@@ -284,6 +356,18 @@ func main() {
 	})
 
 	addr := fmt.Sprintf("%s:%d", listen, port)
-	fmt.Printf("远控已启动 → http://%s\n", addr)
-	log.Fatal(http.ListenAndServe(addr, nil))
+	if useTLS {
+		cert := generateSelfSignedCert()
+		tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}}
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			log.Fatalf("监听失败: %v", err)
+		}
+		tlsLn := tls.NewListener(ln, tlsCfg)
+		fmt.Printf("远控已启动 → https://%s （自签名证书，浏览器需手动信任）\n", addr)
+		log.Fatal(http.Serve(tlsLn, nil))
+	} else {
+		fmt.Printf("远控已启动 → http://%s\n", addr)
+		log.Fatal(http.ListenAndServe(addr, nil))
+	}
 }
