@@ -19,6 +19,7 @@ var (
 	ffRefs     = make(map[int]int)
 	ffPoolQ    = make(map[int]int)
 	ffPoolMW   = make(map[int]int)
+	ffPoolFPS  = make(map[int]int)
 	ffPoolH264 = make(map[int]bool)
 	ffPoolMu   sync.Mutex
 )
@@ -46,12 +47,12 @@ func (f *ffSession) stop() {
 
 // acquireFFmpeg 获取或创建指定显示器的 ffmpeg 会话。
 // 如果参数匹配现有会话则复用（引用计数+1），否则停止旧会话并创建新会话。
-// h264 参数决定使用 H.264 还是 MJPEG 编码。
-func acquireFFmpeg(id, quality, maxW int, h264 bool) *ffSession {
+// h264 决定编码格式，fps 为手动帧率（0=自动检测，仅 ddagrab 模式生效）。
+func acquireFFmpeg(id, quality, maxW, fps int, h264 bool) *ffSession {
 	ffPoolMu.Lock()
 	defer ffPoolMu.Unlock()
 	s, ok := ffPool[id]
-	if ok && ffPoolQ[id] == quality && ffPoolMW[id] == maxW && ffPoolH264[id] == h264 {
+	if ok && ffPoolQ[id] == quality && ffPoolMW[id] == maxW && ffPoolFPS[id] == fps && ffPoolH264[id] == h264 {
 		ffRefs[id]++
 		return s
 	}
@@ -60,12 +61,13 @@ func acquireFFmpeg(id, quality, maxW int, h264 bool) *ffSession {
 		delete(ffPool, id)
 		delete(ffRefs, id)
 	}
-	s = startFFmpeg(id, quality, maxW, h264)
+	s = startFFmpeg(id, quality, maxW, fps, h264)
 	if s != nil {
 		ffPool[id] = s
 		ffRefs[id] = 1
 		ffPoolQ[id] = quality
 		ffPoolMW[id] = maxW
+		ffPoolFPS[id] = fps
 		ffPoolH264[id] = h264
 	}
 	return s
@@ -84,6 +86,7 @@ func releaseFFmpeg(id int) {
 			delete(ffRefs, id)
 			delete(ffPoolQ, id)
 			delete(ffPoolMW, id)
+			delete(ffPoolFPS, id)
 			delete(ffPoolH264, id)
 		}
 	}
@@ -91,7 +94,7 @@ func releaseFFmpeg(id int) {
 
 // ═══════════════════════ 启动（公共） ═══════════════════════
 
-func startFFmpeg(id, quality, maxW int, h264 bool) *ffSession {
+func startFFmpeg(id, quality, maxW, fps int, h264 bool) *ffSession {
 	bounds := screenshot.GetDisplayBounds(id)
 	physW, physH := bounds.Dx(), bounds.Dy()
 
@@ -139,21 +142,23 @@ func startFFmpeg(id, quality, maxW int, h264 bool) *ffSession {
 
 	refreshRate := 60
 	if useDDAGrab {
-		if r := getDisplayRefreshRate(id); r > 0 {
-			refreshRate = r
-		}
-		// 分辨率自适应帧率上限：避免编码器帧积压导致延迟逐渐拉大。
-		// NVENC p1 4K 编码约 100fps，按 380M 像素/秒的安全上限计算。
-		// 下限 60fps，上限不超过显示器真实刷新率。
-		const maxPPS = 380_000_000
-		pixels := capW * capH
-		if pixels > 0 {
-			if capFPS := maxPPS / pixels; refreshRate > capFPS {
-				refreshRate = capFPS
+		if fps > 0 {
+			refreshRate = fps // 用户手动指定帧率，不压上限（用户知道自己在干什么）
+		} else {
+			if r := getDisplayRefreshRate(id); r > 0 {
+				refreshRate = r // 自动检测屏幕刷新率
 			}
-		}
-		if refreshRate < 60 {
-			refreshRate = 60
+			// 分辨率自适应帧率上限：仅在自动模式下生效，避免编码器帧积压。
+			// 700M 像素/秒对 NVENC/Turing+ 安全，4K 约 84fps，1440p 约 140fps。
+			const maxPPS = 700_000_000
+			if px := capW * capH; px > 0 {
+				if capFPS := maxPPS / px; refreshRate > capFPS {
+					refreshRate = capFPS
+				}
+			}
+			if refreshRate < 60 {
+				refreshRate = 60
+			}
 		}
 	}
 

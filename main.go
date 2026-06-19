@@ -55,6 +55,8 @@ var (
 	procReleaseDC           = user32.NewProc("ReleaseDC")
 	procGetDeviceCaps       = gdi32.NewProc("GetDeviceCaps")         // VREFRESH=116 获取刷新率
 	procEnumDisplaySettings = user32.NewProc("EnumDisplaySettingsW") // 逐显示器读取 DEVMODE
+	procEnumDisplayDevices  = user32.NewProc("EnumDisplayDevicesW")  // 枚举显示设备列表
+	procGetMonitorInfo      = user32.NewProc("GetMonitorInfoW")      // 获取 HMONITOR 信息（含设备名）
 )
 
 // keyCodeMap 将浏览器 KeyboardEvent.code 映射为 Windows 虚拟键码（VK）
@@ -176,6 +178,7 @@ type ctrlMsg struct {
 	MX        *int    `json:"mx,omitempty"`
 	MY        *int    `json:"my,omitempty"`
 	Webcodecs *bool   `json:"webcodecs,omitempty"`
+	Fps       *int    `json:"fps,omitempty"`
 }
 
 // statsMsg 定义性能统计消息，每秒由后端推送到前端用于状态栏展示
@@ -191,6 +194,7 @@ type statsMsg struct {
 	Oy      int     `json:"oy"`
 	Zoom    float64 `json:"zoom"`
 	Screens int     `json:"screens"`
+	MaxRate int     `json:"maxrate"` // 显示器刷新率上限（仅 ddagrab）
 }
 
 // main 是程序入口，负责解析命令行参数、初始化组件并启动 HTTP 服务器。

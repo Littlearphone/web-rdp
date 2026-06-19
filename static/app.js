@@ -12,6 +12,8 @@ const select = document.getElementById('screen-id'),
       statusEl = document.getElementById('status-text');
 const controlCheck = document.getElementById('enable-control'),
       qualitySlider = document.getElementById('quality');
+const fpsLabel = document.getElementById('fps-label'),
+      fpsSelect = document.getElementById('fps-rate');
 const qualityVal = document.getElementById('quality-val'),
       maxwSelect = document.getElementById('maxw');
 const statsEl = document.getElementById('stats'),
@@ -32,6 +34,7 @@ let ws = null,
     wasConnected = false,
     lastResKey = '';
 let currentQ = 75,
+    currentFPS = 0,
     currentMW = 0,
     currentScreen = 0,
     screenCount = 1,
@@ -50,7 +53,7 @@ function send(o) {
 
 /** 将当前画质、分辨率和 H.264 设置发送到后端，后端据此重启 ffmpeg 或切换编码器 */
 function sendSettings() {
-    send({ quality: currentQ, maxw: currentMW, webcodecs: useH264 });
+    send({ quality: currentQ, maxw: currentMW, fps: currentFPS, webcodecs: useH264 });
 }
 
 /** 发送键盘事件（按键名 + 按下/释放） */
@@ -616,6 +619,14 @@ function onMessage(event) {
                     updateDesktopScreens();
                 }
             }
+
+            // ddagrab 可用时显示帧率选项，根据 maxrate 生成可选值
+            if (s.maxrate > 0 && !isMobile) {
+                buildFPSOptions(s.maxrate);
+            } else if (!isMobile) {
+                fpsLabel.style.display = 'none';
+                fpsSelect.style.display = 'none';
+            }
         } catch (_) { /* JSON 解析失败，静默忽略 */ }
         return;
     }
@@ -709,6 +720,31 @@ if (!isMobile) {
         select.value = c < screenCount ? c : '0';
     }
 
+    /** 根据显示器刷新率上限构建帧率下拉选项（仅 ddagrab 模式可见） */
+    function buildFPSOptions(maxRate) {
+        fpsLabel.style.display = '';
+        fpsSelect.style.display = '';
+        const opts = [{ label: '自动 (最高 ' + maxRate + ' fps)', value: 0 }];
+        for (const r of [maxRate, 120, 90, 60, 30, 15]) {
+            if (r < maxRate && r >= 15 && !opts.find(o => o.value === r)) {
+                opts.push({ label: r + ' fps', value: r });
+            }
+        }
+        // 仅选项变化时才重建，保持用户选中值
+        if (fpsSelect.options.length !== opts.length ||
+            Array.from(fpsSelect.options).some((o, i) => parseInt(o.value) !== opts[i].value)) {
+            const cur = parseInt(fpsSelect.value);
+            fpsSelect.innerHTML = '';
+            opts.forEach(o => {
+                const e = document.createElement('option');
+                e.value = o.value;
+                e.textContent = o.label;
+                fpsSelect.appendChild(e);
+            });
+            fpsSelect.value = opts.find(o => o.value === cur) ? cur : '0';
+        }
+    }
+
     /** 桌面端分辨率选项更新（仅刷新 UI，不触发 sendSettings） */
     function buildDesktopResolutions(pw, ph) {
         const o = buildResolutions(pw, ph),
@@ -735,6 +771,11 @@ if (!isMobile) {
 
     maxwSelect.onchange = () => {
         currentMW = parseInt(maxwSelect.value);
+        sendSettings();
+    };
+
+    fpsSelect.onchange = () => {
+        currentFPS = parseInt(fpsSelect.value);
         sendSettings();
     };
 

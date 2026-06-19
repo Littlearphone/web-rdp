@@ -75,7 +75,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 	}
 
 	// ── 控制消息接收 ──
-	var currentID, currentQuality, currentMaxW atomic.Int32
+	var currentID, currentQuality, currentMaxW, currentFPS atomic.Int32
 	currentQuality.Store(75)
 
 	readErr := make(chan struct{})
@@ -96,6 +96,9 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				}
 				if cm.MaxW != nil {
 					currentMaxW.Store(int32(*cm.MaxW))
+				}
+				if cm.Fps != nil && *cm.Fps >= 0 {
+					currentFPS.Store(int32(*cm.Fps))
 				}
 				if cm.Text != nil && *cm.Text != "" {
 					doTypeText(*cm.Text)
@@ -137,6 +140,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 		ffScreen     = -1
 		ffQ          = -1
 		ffMW         = -1
+		ffFPS        = -1
 		ffH264       = false
 		goJpgBuf     bytes.Buffer
 		frames       int
@@ -163,16 +167,16 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
-		q, mw := int(currentQuality.Load()), int(currentMaxW.Load())
+		q, mw, fps := int(currentQuality.Load()), int(currentMaxW.Load()), int(currentFPS.Load())
 
 		if useFFmpeg {
 			// ── ffmpeg 路径 ──
 			h264 := useH264.Load()
-			if ff == nil || ffScreen != id || ffQ != q || ffMW != mw || ffH264 != h264 {
+			if ff == nil || ffScreen != id || ffQ != q || ffMW != mw || ffFPS != fps || ffH264 != h264 {
 				if ff != nil {
 					releaseFFmpeg(curScreen)
 				}
-				ff = acquireFFmpeg(id, q, mw, h264)
+				ff = acquireFFmpeg(id, q, mw, fps, h264)
 				if ff == nil {
 					log.Printf("ffmpeg 启动失败")
 					if h264 && tryNextH264Encoder() {
@@ -191,6 +195,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				curScreen = id
 				ffQ = q
 				ffMW = mw
+				ffFPS = fps
 				ffH264 = h264
 				cacheFrame = 0
 				f := "jpeg"
@@ -271,16 +276,44 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				}
 			}
 
-			frames++
+			// 仅计数真实编码帧：MJPEG 每帧一个；H.264 跳过 AUD/SEI/SPS/PPS
+			isFrame := true
+			if useH264.Load() && len(data) > 4 {
+				// data 以 Annex B 起始码开头（3B: 00 00 01 或 4B: 00 00 00 01）
+				// NAL header 在起始码之后，低 5 位是 NAL unit type
+				if data[2] == 1 {
+					isFrame = (data[3]&0x1F) == 1 || (data[3]&0x1F) == 5 // 3 字节起始码
+				} else if data[2] == 0 && data[3] == 1 {
+					isFrame = (data[4]&0x1F) == 1 || (data[4]&0x1F) == 5 // 4 字节起始码
+				}
+			}
+			if isFrame {
+				frames++
+			}
 			if elapsed := time.Since(lastStats); elapsed >= time.Second {
 				fps := float64(frames) / elapsed.Seconds()
 				maxW := float64(maxWait.Microseconds()) / 1000
+				maxRate := 60
+				if hasDDAGrab {
+					if r := getDisplayRefreshRate(id); r > 0 {
+						maxRate = r
+					}
+					// 分辨率上限（与自动模式一致），选项里不写超出编码能力的值
+					if px := cachedBounds.Dx() * cachedBounds.Dy(); px > 0 {
+						if c := 700_000_000 / px; maxRate > c {
+							maxRate = c
+						}
+					}
+					if maxRate < 60 {
+						maxRate = 60
+					}
+				}
 				stat := statsMsg{
 					FPS: math.Round(fps*10) / 10, EncMs: math.Round(maxW*10) / 10,
 					KB: math.Round(float64(len(data))/102.4) / 10, Owner: controlOwner,
 					Ox: cachedBounds.Min.X, Oy: cachedBounds.Min.Y, Zoom: cachedZoom,
 					Q: q, W: cachedBounds.Dx(), H: cachedBounds.Dy(),
-					Screens: screenshot.NumActiveDisplays(),
+					Screens: screenshot.NumActiveDisplays(), MaxRate: maxRate,
 				}
 				if b, _ := json.Marshal(stat); b != nil {
 					select {
@@ -338,7 +371,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				KB: math.Round(float64(len(msg))/102.4) / 10, Owner: controlOwner,
 				Ox: cachedBounds.Min.X, Oy: cachedBounds.Min.Y, Zoom: cachedZoom,
 				Q: q, W: cachedBounds.Dx(), H: cachedBounds.Dy(),
-				Screens: screenshot.NumActiveDisplays(),
+				Screens: screenshot.NumActiveDisplays(), MaxRate: 60,
 			}
 			if b, _ := json.Marshal(stat); b != nil {
 				select {
