@@ -1,3 +1,13 @@
-/web-rdp.exe
-/ffmpeg_local
-/ffmpeg_local/**
+# 前端工程
+views/node_modules/
+
+# 前端构建产物（Vite 生成，Go embed 使用）
+static/
+
+# IDE
+.idea/
+*.iml
+
+# Go 构建产物
+*.exe
+web-rdp
