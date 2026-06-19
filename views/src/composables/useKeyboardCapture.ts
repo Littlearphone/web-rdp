@@ -62,13 +62,13 @@ export function useKeyboardCapture() {
 
   function onKeyDown(e: KeyboardEvent) {
     if (!store.statsOwner) return;
+    // WebSocket 断开时不拦截任何按键，确保浏览器快捷键（F5 刷新等）正常
+    if (!wsOpen()) return;
     // 阻止默认行为但不阻止传播 — 浏览器需要事件正常传播来维护内部键盘状态
     // （e.ctrlKey/e.altKey/e.metaKey 依赖浏览器正确追踪修饰键）
     if (PREVENT_KEYS.has(e.code) || e.ctrlKey || e.altKey || e.metaKey) {
       e.preventDefault();
     }
-    // WebSocket 未就绪时不追踪按键，避免本地状态与实际发送不一致
-    if (!wsOpen()) return;
     // 避免重复按下导致计数偏差（某些平台会连续触发 keydown）
     if (!pressedKeys.has(e.code)) {
       pressedKeys.add(e.code);
@@ -100,17 +100,15 @@ export function useKeyboardCapture() {
 
   function onKeyUp(e: KeyboardEvent) {
     if (!store.statsOwner) return;
-    // keyup 上 preventDefault 防止释放按键后触发浏览器菜单等
-    e.preventDefault();
-    e.stopPropagation();
     // 无论 WebSocket 是否可用，都要清理本地状态，
     // 否则重连后 releaseAllKeys 会发送过期的 keyup
     pressedKeys.delete(e.code);
-    // 仅在 WS 可用时发送，否则 keyup 消息会丢失 — 此时依赖
-    // 连接断开时的 releaseAllKeys 兜底（在 watch connectionStatus 中处理）
-    if (wsOpen()) {
-      store.sendKey(e.code, false);
-    }
+    // WebSocket 断开时不拦截按键，也不发送
+    if (!wsOpen()) return;
+    // keyup 上 preventDefault 防止释放按键后触发浏览器菜单等
+    e.preventDefault();
+    e.stopPropagation();
+    store.sendKey(e.code, false);
 
     // 所有修饰键都释放时，取消安全检查定时器
     if (MODIFIER_CODES.has(e.code) && safetyCheckTimer !== null) {

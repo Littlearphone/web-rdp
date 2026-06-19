@@ -296,7 +296,7 @@ func runDarkDialog(header, body string, buttons []permBtn,
 	// 无 WS_CAPTION — 完全自绘深色背景，但标题仍需传给 CreateWindowExW
 	// 用于在任务栏和 Alt+Tab 中显示窗口名称
 	hwnd, _, _ := _cwEx.Call(
-		uintptr(WS_EX_TOPMOST|WS_EX_CONTROLPARENT),
+		uintptr(WS_EX_CONTROLPARENT),
 		uintptr(unsafe.Pointer(_u16("RDPPermDarkV1"))),
 		uintptr(unsafe.Pointer(_u16(header))),
 		uintptr(WS_POPUP|WS_VISIBLE),
