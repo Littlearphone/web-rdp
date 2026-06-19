@@ -30,6 +30,7 @@ var (
 	userCounter atomic.Int32              // 用户计数器，用于生成默认用户名
 	userMap     = make(map[string]string) // IP → 用户名映射
 	userMapMu   sync.Mutex                // 用户映射的互斥锁
+	connCount   atomic.Int32              // 当前活跃 WebSocket 连接数
 )
 
 // userNameFor 根据客户端 IP 获取或分配用户名。同一 IP 多次连接返回相同用户名
@@ -58,8 +59,12 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 		ip = ip[:idx]
 	}
 	userName := userNameFor(ip)
+	connCount.Add(1)
+	log.Printf("[%s] 已连接 (%s)  在线 %d 人", userName, ip, connCount.Load())
 
 	defer func() {
+		connCount.Add(-1)
+		log.Printf("[%s] 已断开  在线 %d 人", userName, connCount.Load())
 		if ff != nil {
 			ff.unsubscribe(subID)
 			releaseFFmpeg(curScreen)
@@ -152,6 +157,27 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 						}
 					}
 				}
+				if cm.User != nil {
+					newName := strings.TrimSpace(*cm.User)
+					if newName != "" && newName != userName {
+						oldName := userName
+						userMapMu.Lock()
+						userMap[ip] = newName
+						userMapMu.Unlock()
+						userName = newName
+						// 如果改名者是当前控制者，同步更新 controlOwner
+						controlMu.Lock()
+						if controlOwner == oldName {
+							controlOwner = newName
+						}
+						controlMu.Unlock()
+						log.Printf("[%s] 改名为 %s", oldName, newName)
+						// 通知客户端改名成功
+						if b, _ := json.Marshal(map[string]string{"user": newName}); b != nil {
+							outCh <- wsMessage{websocket.TextMessage, b}
+						}
+					}
+				}
 				if cm.Webcodecs != nil {
 					useH264.Store(*cm.Webcodecs && currentH264Encoder() != "")
 				}
@@ -231,6 +257,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 
 			// 仅控制者可因参数变化重启 ffmpeg；非控制者静默接受现有参数
 			if ff == nil || ffScreen != id || (paramsChanged && isCtrl) {
+				firstJoin := ff == nil
 				if ff != nil {
 					ff.unsubscribe(subID)
 					releaseFFmpeg(curScreen)
@@ -241,13 +268,13 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 					ff = acquireFFmpeg(id, q, mw, fps, h264)
 				}
 				if ff == nil {
-					log.Printf("ffmpeg 启动失败")
+					log.Printf("[%s] ffmpeg 启动失败 display=%d", userName, id)
 					if h264 && tryNextH264Encoder() {
 						continue // 回退到下一个编码器重试
 					}
 					if h264 {
 						useH264.Store(false)
-						log.Printf("所有 H.264 编码器已耗尽，回退到 MJPEG")
+						log.Printf("H.264 编码器全部失败，回退 MJPEG")
 						continue
 					}
 					time.Sleep(time.Second)
@@ -279,7 +306,12 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				if ffH264 {
 					f = "h264"
 				}
-				log.Printf("编码格式切换 → %s", f)
+				// 仅在有意义的场景打印日志
+				if paramsChanged && isCtrl {
+					log.Printf("[%s] 调整参数 → %s q=%d mw=%d fps=%d", userName, f, ffQ, ffMW, ffFPS)
+				} else if firstJoin {
+					log.Printf("[%s] 加入会话 → 显示器%d %s q=%d mw=%d", userName, id, f, ffQ, ffMW)
+				}
 				if b, _ := json.Marshal(map[string]interface{}{
 					"format": f, "quality": ffQ, "maxw": ffMW, "fps": ffFPS,
 				}); b != nil {
@@ -308,7 +340,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			case <-readErr:
 				return
 			case <-time.After(5 * time.Second):
-				log.Printf("ffmpeg 无帧")
+				log.Printf("[%s] ffmpeg 超时无帧 display=%d", userName, curScreen)
 				ff.unsubscribe(subID)
 				releaseFFmpeg(curScreen)
 				ff = nil
@@ -319,7 +351,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				}
 				if ffH264 {
 					useH264.Store(false)
-					log.Printf("所有 H.264 编码器已耗尽，回退到 MJPEG")
+					log.Printf("H.264 编码器全部失败，回退 MJPEG")
 				}
 				continue
 			}
@@ -379,6 +411,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 					Ox: cachedBounds.Min.X, Oy: cachedBounds.Min.Y, Zoom: cachedZoom,
 					Q: q, W: cachedBounds.Dx(), H: cachedBounds.Dy(),
 					Screens: screenshot.NumActiveDisplays(), MaxRate: maxRate,
+					Users: int(connCount.Load()),
 				}
 				if b, _ := json.Marshal(stat); b != nil {
 					select {
@@ -442,6 +475,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				Ox: cachedBounds.Min.X, Oy: cachedBounds.Min.Y, Zoom: cachedZoom,
 				Q: q, W: cachedBounds.Dx(), H: cachedBounds.Dy(),
 				Screens: screenshot.NumActiveDisplays(), MaxRate: 60,
+				Users: int(connCount.Load()),
 			}
 			if b, _ := json.Marshal(stat); b != nil {
 				select {

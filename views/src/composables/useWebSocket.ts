@@ -43,6 +43,15 @@ export function useWebSocket() {
               }
             }, 2000);
           }
+          // pending 60 秒超时兜底：防止宿主弹窗异常消失后客户端永久卡住
+          if (s.control_status === 'pending') {
+            setTimeout(() => {
+              if (store.controlStatus === 'pending') {
+                store.controlStatus = 'idle';
+                store.controlMsg = '请求超时，请重试';
+              }
+            }, 60000);
+          }
           return; // 控制状态消息不含其他数据
         }
 
@@ -75,6 +84,7 @@ export function useWebSocket() {
         store.statsH = s.h || 0;
         store.statsQ = s.q || 0;
         store.statsMaxRate = s.maxrate || 0;
+        if (s.users !== undefined) store.statsUsers = s.users;
 
         // 控制权
         if (s.owner !== undefined) {

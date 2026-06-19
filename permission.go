@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"runtime"
 	"sync"
 	"syscall"
@@ -430,7 +431,23 @@ func showControlRequestDialog(userName string) (int, bool) {
 	header := fmt.Sprintf("用户「%s」请求远程控制权限", userName)
 	body := "请选择允许或拒绝此请求。\n勾选【记住我的选择】可将本次选择设为永久规则。"
 
-	return runDarkDialog(header, body, buttons, true, nil, 480, 220)
+	// 注册 HWND，确保 closeActiveDialog() 可以在客户端断开时关闭此弹窗
+	btn, remember := runDarkDialog(header, body, buttons, true, func(hwnd uintptr) {
+		activeDlgMu.Lock()
+		activeDlgUser = userName
+		activeDlgHwnd = hwnd
+		activeDlgMu.Unlock()
+	}, 480, 220)
+
+	// 弹窗已关闭，清理全局状态（与 showActiveControlDialog 的 defer 对应）
+	activeDlgMu.Lock()
+	if activeDlgUser == userName {
+		activeDlgUser = ""
+		activeDlgHwnd = 0
+	}
+	activeDlgMu.Unlock()
+
+	return btn, remember
 }
 
 func showActiveControlDialog(userName string) {
@@ -498,6 +515,16 @@ func requestControl(userName string) string {
 }
 
 func doRequestControlWithDialog(userName string, onResult func(granted bool)) {
+	// defer recover 确保 onResult 一定会被调用，防止客户端永久卡在 pending 状态。
+	// Win32 消息循环/窗口过程可能因外部原因（如 DLL 卸载、窗口句柄失效等）panic，
+	// 此时必须在进程内兜底，通知客户端释放等待状态。
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("权限弹窗 panic: %v", r)
+			onResult(false)
+		}
+	}()
+
 	btn, remember := showControlRequestDialog(userName)
 
 	switch btn {

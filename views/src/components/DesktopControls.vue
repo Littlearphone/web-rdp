@@ -1,5 +1,15 @@
 <template>
   <div id="bar">
+    <!-- 用户名：点击可修改 -->
+    <n-tooltip trigger="hover">
+      <template #trigger>
+        <span class="user-tag" @click="onEditUser">{{ store.statsUser }}</span>
+      </template>
+      点击修改用户名
+    </n-tooltip>
+
+    <span class="sep">|</span>
+
     <!-- 屏幕选择：始终可见 -->
     <n-select
       v-model:value="store.currentScreen"
@@ -9,21 +19,28 @@
       @update:value="onScreenChange"
     />
 
-    <!-- 控制权开关：始终可见，紧跟屏幕选项 -->
-    <span class="sep">|</span>
+    <!-- 控制权开关：他人控制时完全隐藏（避免通过浏览器 DevTools 篡改 disabled 属性） -->
+    <template v-if="controlSwitchVisible">
+      <span class="sep">|</span>
 
-    <n-switch
-      v-model:value="controlOn"
-      :disabled="controlDisabled"
-      size="small"
-      @update:value="onControlToggle"
-    />
-    <n-tooltip trigger="hover">
-      <template #trigger>
-        <span class="label">{{ controlTip }}</span>
-      </template>
-      {{ controlTitle }}
-    </n-tooltip>
+      <n-switch
+        v-model:value="controlOn"
+        :disabled="controlDisabled"
+        size="small"
+        @update:value="onControlToggle"
+      />
+      <n-tooltip trigger="hover">
+        <template #trigger>
+          <span class="label">{{ controlTip }}</span>
+        </template>
+        {{ controlTitle }}
+      </n-tooltip>
+    </template>
+    <!-- 他人控制时仅展示文字提示，无开关 -->
+    <template v-else>
+      <span class="sep">|</span>
+      <span class="label" style="color:#888">{{ controlTip }}</span>
+    </template>
 
     <!-- 画质 / 分辨率 / 编码 / 帧率：仅控制者可见 -->
     <template v-if="isController">
@@ -82,6 +99,8 @@
     <!-- 动态数据 -->
     <span class="sep">|</span>
     <span class="stat">{{ store.statsFps }}fps | {{ store.statsEncMs }}ms | {{ (store.statsKb * store.statsFps / 1024).toFixed(1) }}MB/s</span>
+    <span class="sep">|</span>
+    <span class="stat">{{ store.statsUsers }} 人在线</span>
 
     <!-- 连接状态 -->
     <span style="margin-left:auto">
@@ -140,23 +159,23 @@ function onFPSChange(v: number) {
 
 // ── 控制权 ──
 const controlOn = ref(false);
-const controlDisabled = computed(() => {
-  // 正在等待审批时禁用开关
-  if (store.controlStatus === 'pending') return true;
-  // 他人控制时禁用
-  if (!store.statsOwner) return false;
-  return store.statsOwner !== store.statsUser;
-});
+/** 开关是否可见：无人控制或自己控制时显示，他人控制时隐藏防止 DevTools 篡改 */
+const controlSwitchVisible = computed(() =>
+  !store.statsOwner || store.statsOwner === store.statsUser,
+);
+const controlDisabled = computed(() => store.controlStatus === 'pending');
 const controlTitle = computed(() => {
   if (store.controlStatus === 'pending') return '等待宿主确认...';
+  if (store.statsOwner === store.statsUser) return '你正在控制此电脑';
   return store.statsOwner
-    ? `${store.statsOwner} 正在控制`
+    ? `${store.statsOwner} 正在控制此电脑`
     : '打开开关获取控制权';
 });
 const controlTip = computed(() => {
   if (store.controlStatus === 'pending') return '请求中...';
   if (store.controlStatus === 'denied' || store.controlStatus === 'busy')
     return store.controlMsg || '控制';
+  if (store.statsOwner === store.statsUser) return '你正在控制';
   return store.statsOwner
     ? `${store.statsOwner} 正在控制`
     : '控制';
@@ -224,6 +243,13 @@ function onH264Toggle(v: boolean) {
   store.sendSettings();
 }
 
+function onEditUser() {
+  const name = prompt('输入新用户名', store.statsUser);
+  if (name && name.trim() && name.trim() !== store.statsUser) {
+    store.send({ user: name.trim() });
+  }
+}
+
 const statusText = computed(() => {
   switch (store.connectionStatus) {
     case 'connecting': return '连接中...';
@@ -271,6 +297,18 @@ function onStatusClick() {
 
 .sep {
   color: #444;
+}
+
+.user-tag {
+  font-size: 12px;
+  color: #f0c040;
+  cursor: pointer;
+  white-space: nowrap;
+  border-bottom: 1px dashed #666;
+}
+.user-tag:hover {
+  color: #f8d860;
+  border-bottom-color: #f0c040;
 }
 
 .stat {

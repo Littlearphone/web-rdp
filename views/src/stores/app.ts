@@ -48,6 +48,7 @@ export const useAppStore = defineStore('app', () => {
   const statsQ = ref(0);
   const statsOwner = ref('');
   const statsMaxRate = ref(0);
+  const statsUsers = ref(0);
 
   // ═══════════════════════════════════════════
   // UI 状态
@@ -129,7 +130,7 @@ export const useAppStore = defineStore('app', () => {
     currentQ, currentFPS, currentMW, currentScreen,
     screenCount, origPw, origPh, meta,
     statsUser, statsFps, statsEncMs, statsKb, statsW, statsH, statsQ,
-    statsOwner, statsMaxRate,
+    statsOwner, statsMaxRate, statsUsers,
     mobileResOpts, mobileUIBuilt, lastResKey, isMobile,
     controlStatus, controlMsg,
     // 计算属性

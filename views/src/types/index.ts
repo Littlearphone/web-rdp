@@ -36,6 +36,7 @@ export interface CtrlMsg {
   my?: number;
   webcodecs?: boolean;
   fps?: number;
+  user?: string;
 }
 
 /** 性能统计消息（后端每秒推送） */
@@ -52,6 +53,7 @@ export interface StatsMsg {
   zoom: number;
   screens: number;
   maxrate: number;
+  users?: number;
 }
 
 /** 初始化 / 格式切换消息（用户名 + 编码格式 + 会话实际参数） */

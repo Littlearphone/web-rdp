@@ -210,8 +210,9 @@ type ctrlMsg struct {
 	MY        *int    `json:"my,omitempty"`
 	Webcodecs *bool   `json:"webcodecs,omitempty"`
 	Fps       *int    `json:"fps,omitempty"`
-	MouseBtn  *string `json:"mb,omitempty"` // 鼠标按钮: "left" / "right"
-	MouseDn   *bool   `json:"md,omitempty"` // true=按下 / false=释放
+	MouseBtn  *string `json:"mb,omitempty"`   // 鼠标按钮: "left" / "right"
+	MouseDn   *bool   `json:"md,omitempty"`   // true=按下 / false=释放
+	User      *string `json:"user,omitempty"` // 修改用户名
 }
 
 // statsMsg 定义性能统计消息，每秒由后端推送到前端用于状态栏展示
@@ -228,6 +229,7 @@ type statsMsg struct {
 	Zoom    float64 `json:"zoom"`
 	Screens int     `json:"screens"`
 	MaxRate int     `json:"maxrate"` // 显示器刷新率上限（仅 ddagrab）
+	Users   int     `json:"users"`   // 当前在线连接数
 }
 
 // main 是程序入口，负责解析命令行参数、初始化组件并启动 HTTP 服务器。
