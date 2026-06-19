@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"log"
 	"os/exec"
@@ -25,10 +26,12 @@ var (
 // ffSession 表示一个正在运行的 ffmpeg 进程会话。
 // 每个显示器+参数组合可共享同一个 ffmpeg 进程（引用计数管理）
 type ffSession struct {
-	cmd     *exec.Cmd     // ffmpeg 子进程
-	stdout  *bufio.Reader // 缓冲读取 ffmpeg stdout 管道
-	frameCh chan []byte   // 解码后的帧数据通道
-	stopCh  chan struct{} // 停止信号通道
+	cmd        *exec.Cmd     // ffmpeg 子进程
+	stdout     *bufio.Reader // 缓冲读取 ffmpeg stdout 管道
+	frameCh    chan []byte   // 解码后的帧数据通道
+	stopCh     chan struct{} // 停止信号通道
+	stderrBuf  *bytes.Buffer // ffmpeg stderr（用于诊断编码器报错）
+	stderrDone chan struct{} // stderr 读取完成的信号
 }
 
 // stop 终止 ffmpeg 进程并关闭帧通道
@@ -131,23 +134,45 @@ func startFFmpeg(id, quality, maxW int, h264 bool) *ffSession {
 		}
 		vf = fmt.Sprintf("scale=%d:%d:flags=fast_bilinear,format=yuv420p", outW, outH)
 	}
+	// ddagrab 的 hwdownload,format=bgra 已移入 lavfi 输入滤镜图内，
+	// -vf 链只处理后续纯系统内存的格式转换，GPU 编码器可直接接受 bgra 帧。
+
+	refreshRate := 60
 	if useDDAGrab {
-		// ddagrab 输出 D3D11 硬件纹理，需先 hwdownload 到系统内存再处理
-		vf = "hwdownload,format=bgra," + vf
+		if r := getDisplayRefreshRate(id); r > 0 {
+			refreshRate = r
+		}
+		// 分辨率自适应帧率上限：避免编码器帧积压导致延迟逐渐拉大。
+		// NVENC p1 4K 编码约 100fps，按 380M 像素/秒的安全上限计算。
+		// 下限 60fps，上限不超过显示器真实刷新率。
+		const maxPPS = 380_000_000
+		pixels := capW * capH
+		if pixels > 0 {
+			if capFPS := maxPPS / pixels; refreshRate > capFPS {
+				refreshRate = capFPS
+			}
+		}
+		if refreshRate < 60 {
+			refreshRate = 60
+		}
 	}
 
 	var args []string
 	if h264 {
-		args = h264Args(useDDAGrab, id, capX, capY, capW, capH, vf, quality)
+		args = h264Args(useDDAGrab, id, refreshRate, capX, capY, capW, capH, vf, quality)
 		if args == nil {
 			return nil
 		}
 	} else {
-		args = mjpegArgs(useDDAGrab, id, capX, capY, capW, capH, vf, ffQ)
+		args = mjpegArgs(useDDAGrab, id, refreshRate, capX, capY, capW, capH, vf, ffQ)
 	}
 
 	cmd := exec.Command(ffmpegPath, args...)
 	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil
+	}
+	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		return nil
 	}
@@ -159,14 +184,36 @@ func startFFmpeg(id, quality, maxW int, h264 bool) *ffSession {
 	if useDDAGrab {
 		devName = "ddagrab"
 	}
-	log.Printf("ffmpeg: %s %dx%d out=%dx%d", devName, physW, physH, outW, outH)
+	log.Printf("ffmpeg: %s %dx%d @%dHz out=%dx%d", devName, physW, physH, refreshRate, outW, outH)
 
 	ff := &ffSession{
-		cmd:     cmd,
-		stdout:  bufio.NewReaderSize(stdout, 256*1024),
-		frameCh: make(chan []byte, 16),
-		stopCh:  make(chan struct{}),
+		cmd:        cmd,
+		stdout:     bufio.NewReaderSize(stdout, 256*1024),
+		frameCh:    make(chan []byte, 16),
+		stopCh:     make(chan struct{}),
+		stderrBuf:  new(bytes.Buffer),
+		stderrDone: make(chan struct{}),
 	}
+	// 异步读取 stderr 用于诊断
+	go func() {
+		defer close(ff.stderrDone)
+		buf := make([]byte, 4096)
+		for {
+			n, err := stderr.Read(buf)
+			if n > 0 {
+				ff.stderrBuf.Write(buf[:n])
+			}
+			if err != nil {
+				// 限制 stderr 缓冲区大小，防止异常情况下无限增长
+				if ff.stderrBuf.Len() > 64*1024 {
+					tail := ff.stderrBuf.Bytes()
+					ff.stderrBuf.Reset()
+					ff.stderrBuf.Write(tail[len(tail)-4096:])
+				}
+				return
+			}
+		}
+	}()
 
 	if h264 {
 		go h264Reader(ff)
@@ -182,20 +229,21 @@ func startFFmpeg(id, quality, maxW int, h264 bool) *ffSession {
 // GPU 编码器优先（低延迟、低 CPU 占用），libx264 作为最终回退。
 // quality 为用户画质滑块值（10-100），映射到各编码器的质量/码率参数。
 // 当编码器列表耗尽时返回 nil，由调用方回退到 MJPEG。
-func h264Args(useDDAGrab bool, id, cx, cy, cw, ch int, vf string, quality int) []string {
+func h264Args(useDDAGrab bool, id, refreshRate, cx, cy, cw, ch int, vf string, quality int) []string {
 	base := []string{
 		"-hide_banner", "-loglevel", "error",
 		"-sws_flags", "fast_bilinear",
 	}
 	if useDDAGrab {
-		// ddagrab 是 video source filter，通过 lavfi 设备加载
+		// ddagrab 输出 D3D11 纹理；hwdownload+format=bgra 放同一滤镜图内，
+		// 否则 -vf 链无法跨滤镜图访问硬件上下文，导致 GPU 编码器报错退出。
 		base = append(base,
 			"-f", "lavfi",
-			"-i", fmt.Sprintf("ddagrab=output_idx=%d:framerate=60:draw_mouse=1", id),
+			"-i", fmt.Sprintf("ddagrab=output_idx=%d:framerate=%d:draw_mouse=1,hwdownload,format=bgra", id, refreshRate),
 		)
 	} else {
 		base = append(base,
-			"-f", "gdigrab", "-framerate", "60",
+			"-f", "gdigrab", "-framerate", strconv.Itoa(refreshRate),
 			"-draw_mouse", "1",
 			"-offset_x", strconv.Itoa(cx),
 			"-offset_y", strconv.Itoa(cy),
@@ -282,6 +330,10 @@ func h264Reader(ff *ffSession) {
 		n, err := ff.stdout.Read(raw)
 		if err != nil {
 			// ffmpeg 进程退出（驱动不支持、参数错误等）
+			// 打印 stderr 以诊断编码器/滤镜失败原因
+			if ff.stderrBuf.Len() > 0 {
+				log.Printf("ffmpeg stderr: %s", string(ff.stderrBuf.Bytes()))
+			}
 			// 如果未发送任何帧，通知主循环即时回退，无需等 5 秒超时
 			if !sentFrames {
 				select {
@@ -319,7 +371,7 @@ func h264Reader(ff *ffSession) {
 
 // mjpegArgs 构建 MJPEG 编码的 ffmpeg 命令行参数。
 // 使用 image2pipe 容器直接输出 JPEG 数据流，前端通过 SOI/EOI 标记分割帧。
-func mjpegArgs(useDDAGrab bool, id, cx, cy, cw, ch int, vf string, ffQ int) []string {
+func mjpegArgs(useDDAGrab bool, id, refreshRate, cx, cy, cw, ch int, vf string, ffQ int) []string {
 	args := []string{
 		"-hide_banner", "-loglevel", "error",
 		"-sws_flags", "fast_bilinear",
@@ -327,11 +379,11 @@ func mjpegArgs(useDDAGrab bool, id, cx, cy, cw, ch int, vf string, ffQ int) []st
 	if useDDAGrab {
 		args = append(args,
 			"-f", "lavfi",
-			"-i", fmt.Sprintf("ddagrab=output_idx=%d:framerate=60:draw_mouse=1", id),
+			"-i", fmt.Sprintf("ddagrab=output_idx=%d:framerate=%d:draw_mouse=1,hwdownload,format=bgra", id, refreshRate),
 		)
 	} else {
 		args = append(args,
-			"-f", "gdigrab", "-framerate", "60",
+			"-f", "gdigrab", "-framerate", strconv.Itoa(refreshRate),
 			"-draw_mouse", "1",
 			"-offset_x", strconv.Itoa(cx),
 			"-offset_y", strconv.Itoa(cy),
@@ -361,6 +413,9 @@ func mjpegReader(ff *ffSession) {
 		}
 		jpg, err := readJPEG(ff.stdout, buf)
 		if err != nil {
+			if ff.stderrBuf.Len() > 0 {
+				log.Printf("ffmpeg stderr: %s", string(ff.stderrBuf.Bytes()))
+			}
 			return
 		}
 		buf = jpg

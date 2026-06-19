@@ -45,11 +45,16 @@ var (
 	controlOwner            string     // 当前控制权的持有者用户名
 	controlMu               sync.Mutex // 控制权的互斥锁
 	user32                  = syscall.NewLazyDLL("user32.dll")
+	gdi32                   = syscall.NewLazyDLL("gdi32.dll")
 	procSetCursorPos        = user32.NewProc("SetCursorPos")        // 设置光标位置
 	procMouseWait           = user32.NewProc("mouse_event")         // 鼠标事件（点击/移动）
 	procKeybdWait           = user32.NewProc("keybd_event")         // 键盘事件（按下/释放）
 	procEnumDisplayMonitors = user32.NewProc("EnumDisplayMonitors") // 枚举显示器
 	procSetProcessDPIAware  = user32.NewProc("SetProcessDPIAware")  // 设置 DPI 感知
+	procGetDC               = user32.NewProc("GetDC")               // 获取桌面 DC（用于读取刷新率）
+	procReleaseDC           = user32.NewProc("ReleaseDC")
+	procGetDeviceCaps       = gdi32.NewProc("GetDeviceCaps")         // VREFRESH=116 获取刷新率
+	procEnumDisplaySettings = user32.NewProc("EnumDisplaySettingsW") // 逐显示器读取 DEVMODE
 )
 
 // keyCodeMap 将浏览器 KeyboardEvent.code 映射为 Windows 虚拟键码（VK）

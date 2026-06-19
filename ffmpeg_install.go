@@ -65,6 +65,8 @@ func detectFFmpeg() {
 			if !hasDDAGrab {
 				log.Printf("→ 使用本地 ffmpeg（gdigrab 模式）")
 			}
+		} else if !checkNVENCOk(local) {
+			log.Printf("⚠ NVENC 与当前驱动不兼容，建议更新驱动或删除 ffmpeg_local/ 重新下载")
 		}
 		return
 	}
@@ -85,6 +87,8 @@ func detectFFmpeg() {
 			if !hasDDAGrab {
 				log.Printf("→ 使用系统 ffmpeg（gdigrab 模式）")
 			}
+		} else if !checkNVENCOk(p) {
+			log.Printf("⚠ 系统 ffmpeg 的 NVENC 与当前驱动不兼容，建议更新驱动或指定兼容版本")
 		}
 		return
 	}
@@ -175,7 +179,9 @@ func askYN(prompt string) bool {
 	return line == "" || line == "y" || line == "yes"
 }
 
-// resolveDownloadURL 从 GitHub Releases API 获取最新 win64-gpl ffmpeg 压缩包的下载地址
+// resolveDownloadURL 从 GitHub Releases API 获取 ffmpeg 下载地址。
+// 优先选择 n7.1 稳定版（NVENC SDK 较旧，驱动兼容性最广），
+// 跳过 master 每日构建（NVENC SDK 最新，可能要求驱动 ≥610.00）和 shared 构建。
 func resolveDownloadURL() string {
 	resp, err := httpClient.Get(ffmpegReleaseAPI)
 	if err != nil {
@@ -191,6 +197,26 @@ func resolveDownloadURL() string {
 	if json.NewDecoder(resp.Body).Decode(&release) != nil {
 		return ""
 	}
+	// 优先级：n7.1 静态 > n8.1 静态 > n7.1 shared > n8.1 shared > 其他
+	// shared 构建庞大且 DLL 多，放到末尾；master 版本 NVENC 驱动要求过高，跳过。
+	prefer := []string{"n7.1-win64-gpl", "n8.1-win64-gpl", "n7.1-win64-gpl-shared", "n8.1-win64-gpl-shared"}
+	for _, key := range prefer {
+		for _, a := range release.Assets {
+			if strings.Contains(a.Name, key) && strings.HasSuffix(a.Name, ".zip") {
+				return a.BrowserDownloadURL
+			}
+		}
+	}
+	// 回退：任意 win64 gpl（排除 master 和 shared）
+	for _, a := range release.Assets {
+		name := a.Name
+		if strings.Contains(name, "win64") && strings.Contains(name, "gpl") &&
+			!strings.Contains(name, "shared") && !strings.Contains(name, "master") &&
+			strings.HasSuffix(name, ".zip") {
+			return a.BrowserDownloadURL
+		}
+	}
+	// 最终回退：任意 win64 gpl zip
 	for _, a := range release.Assets {
 		if strings.Contains(a.Name, "win64") && strings.Contains(a.Name, "gpl") && strings.HasSuffix(a.Name, ".zip") {
 			return a.BrowserDownloadURL
@@ -204,6 +230,15 @@ func resolveDownloadURL() string {
 func checkDDAGrab(path string) bool {
 	out, err := exec.Command(path, "-hide_banner", "-filters").Output()
 	return err == nil && strings.Contains(string(out), "ddagrab")
+}
+
+// checkNVENCOk 快速检查 h264_nvenc 是否与当前 NVIDIA 驱动兼容。
+// 用 test source 做 1 帧编码→null 输出，检查 stderr 是否有 "nvenc API version" 报错。
+func checkNVENCOk(path string) bool {
+	cmd := exec.Command(path, "-hide_banner", "-f", "lavfi", "-i", "testsrc=d=1:r=1",
+		"-c:v", "h264_nvenc", "-f", "null", "-")
+	out, _ := cmd.CombinedOutput()
+	return !strings.Contains(string(out), "nvenc API version")
 }
 
 // downloadAndExtract 下载 ffmpeg 压缩包并解压到 ffmpeg_local/ 目录。
