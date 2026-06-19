@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -11,6 +12,7 @@ import (
 	"encoding/pem"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"math/big"
@@ -18,6 +20,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +29,18 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+// tlsLogFilter 过滤 http.Server.ErrorLog 中的 TLS 握手错误。
+// 自签名证书下浏览器在用户手动信任前会触发大量 "TLS handshake error"，
+// 这些是预期行为，不需要输出到控制台。
+type tlsLogFilter struct{ out io.Writer }
+
+func (f *tlsLogFilter) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte("TLS handshake error")) {
+		return len(p), nil
+	}
+	return f.out.Write(p)
+}
 
 //go:embed static
 var staticFS embed.FS
@@ -329,8 +344,17 @@ func main() {
 	flag.Parse()
 
 	// ── 证书加载 / 生成 ──
-	const certFile = "cert.pem"
-	const keyFile = "key.pem"
+	// 证书存放在 %APPDATA%/web-rdp/ 下，与系统规范一致
+	appDataDir, err := os.UserConfigDir()
+	if err != nil {
+		log.Fatalf("无法获取用户配置目录: %v", err)
+	}
+	appDir := filepath.Join(appDataDir, "web-rdp")
+	if err := os.MkdirAll(appDir, 0700); err != nil {
+		log.Fatalf("无法创建应用数据目录 %s: %v", appDir, err)
+	}
+	certFile := filepath.Join(appDir, "cert.pem")
+	keyFile := filepath.Join(appDir, "key.pem")
 
 	cert, ok := loadCertFromDisk(certFile, keyFile)
 	if !ok {
@@ -342,7 +366,7 @@ func main() {
 		if err := os.WriteFile(keyFile, keyPEM, 0600); err != nil {
 			log.Printf("⚠ 无法保存私钥: %v", err)
 		}
-		fmt.Printf("→ 自签名证书已保存 (%s / %s)\n", certFile, keyFile)
+		fmt.Printf("→ 自签名证书已保存 (%s)\n", appDir)
 	}
 
 	if ffmpegArg != "" {
@@ -401,6 +425,11 @@ func main() {
 		_, _, _ = procMouseWait.Call(uintptr(0x0004), uintptr(ix), uintptr(iy), 0, 0) // LEFTUP
 	})
 
+	// 自定义 Server，过滤自签名证书导致的 TLS 握手噪音日志
+	srv := &http.Server{
+		ErrorLog: log.New(&tlsLogFilter{os.Stderr}, "", 0),
+	}
+
 	addr := fmt.Sprintf("%s:%d", listen, port)
 	if useTLS {
 		tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}}
@@ -410,9 +439,10 @@ func main() {
 		}
 		tlsLn := tls.NewListener(ln, tlsCfg)
 		fmt.Printf("远控已启动 → https://%s （自签名证书，浏览器需手动信任）\n", addr)
-		log.Fatal(http.Serve(tlsLn, nil))
+		log.Fatal(srv.Serve(tlsLn))
 	} else {
 		fmt.Printf("远控已启动 → http://%s\n", addr)
-		log.Fatal(http.ListenAndServe(addr, nil))
+		srv.Addr = addr
+		log.Fatal(srv.ListenAndServe())
 	}
 }
