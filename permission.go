@@ -35,7 +35,6 @@ var (
 	_sysInfo       = _u32.NewProc("SystemParametersInfoW")
 	_sendMsg       = _u32.NewProc("SendMessageW")
 	_loadIco       = _u32.NewProc("LoadIconW")
-	_msgBox        = _u32.NewProc("MessageBoxW")
 	_getCurThrId   = _k32.NewProc("GetCurrentThreadId")
 	_getClientRect = _u32.NewProc("GetClientRect")
 
@@ -77,11 +76,6 @@ const (
 	IDI_INFORMATION   = 32516
 	STM_SETICON       = 0x0170
 	BM_GETCHECK       = 0x00F0
-
-	MB_OK       = 0x00000000
-	MB_TOPMOST  = 0x00040000
-	MB_ICONINFO = 0x00000040
-	MB_ICONWARN = 0x00000030
 
 	BTN_ALLOW      = 100
 	BTN_DENY       = 102
@@ -127,7 +121,8 @@ func _u16(s string) *uint16 {
 	if s == "" {
 		return nil
 	}
-	return syscall.StringToUTF16Ptr(s)
+	p, _ := syscall.UTF16PtrFromString(s)
+	return p
 }
 func _inst() uintptr {
 	h, _, _ := _k32.NewProc("GetModuleHandleW").Call(0)
@@ -154,7 +149,7 @@ func _permGdiInit() {
 
 func _permReadCheck() {
 	ck, _, _ := _sendMsg.Call(_permChkHwnd, BM_GETCHECK, 0, 0)
-	_permResultRemember = (ck == 1)
+	_permResultRemember = ck == 1
 }
 
 func permWndProc(hwnd, msg, wp, lp uintptr) uintptr {
@@ -169,13 +164,13 @@ func permWndProc(hwnd, msg, wp, lp uintptr) uintptr {
 	case WM_ERASEBKGND:
 		// 用深色画刷填充整个客户区
 		var rc struct{ L, T, R, B int32 }
-		_getClientRect.Call(hwnd, uintptr(unsafe.Pointer(&rc)))
-		_fillRect.Call(wp, uintptr(unsafe.Pointer(&rc)), _permBgBr)
+		_, _, _ = _getClientRect.Call(hwnd, uintptr(unsafe.Pointer(&rc)))
+		_, _, _ = _fillRect.Call(wp, uintptr(unsafe.Pointer(&rc)), _permBgBr)
 		return 1
 
 	case WM_CTLCOLORSTATIC:
-		_setBkMode.Call(wp, TRANSPARENT)
-		_setTxtCol.Call(wp, _permTxClr)
+		_, _, _ = _setBkMode.Call(wp, TRANSPARENT)
+		_, _, _ = _setTxtCol.Call(wp, _permTxClr)
 		return _permBgBr
 
 	case WM_COMMAND:
@@ -291,7 +286,7 @@ func runDarkDialog(header, body string, buttons []permBtn,
 	_permShowCheckbox = showCheckbox
 
 	var wa struct{ L, T, R, B int32 }
-	_sysInfo.Call(0x0030, 0, uintptr(unsafe.Pointer(&wa)), 0)
+	_, _, _ = _sysInfo.Call(0x0030, 0, uintptr(unsafe.Pointer(&wa)), 0)
 	x := int((wa.R - wa.L - int32(dlgW)) / 2)
 	y := int((wa.B - wa.T - int32(dlgH)) / 2)
 	if x < 0 {
@@ -320,20 +315,20 @@ func runDarkDialog(header, body string, buttons []permBtn,
 
 	// 图标 (同 dlgcheck.go)
 	ic := _permCtl(hwnd, "STATIC", "", SS_ICON, 0, 48, 32, 28, 28)
-	_sendMsg.Call(ic, STM_SETICON, _permIco, 0)
+	_, _, _ = _sendMsg.Call(ic, STM_SETICON, _permIco, 0)
 
 	// 标题 — 大字体
 	h1 := _permCtl(hwnd, "STATIC", header, SS_LEFT, 0, 108, 26, dlgW-118, 36)
-	_sendMsg.Call(h1, WM_SETFONT, _permFBig, 1)
+	_, _, _ = _sendMsg.Call(h1, WM_SETFONT, _permFBig, 1)
 
 	// 正文 — 中等字体
 	h2 := _permCtl(hwnd, "STATIC", body, SS_LEFT, 0, 108, 68, dlgW-118, 20)
-	_sendMsg.Call(h2, WM_SETFONT, _permFMid, 1)
+	_, _, _ = _sendMsg.Call(h2, WM_SETFONT, _permFMid, 1)
 
 	// 复选框（可选）
 	if showCheckbox {
 		_permChkHwnd = _permCtl(hwnd, "BUTTON", "记住我的选择", WS_TABSTOP|BS_AUTOCHECKBOX, CHK_REMEMBER, 108, 108, 220, 26)
-		_sendMsg.Call(_permChkHwnd, WM_SETFONT, _permFSml, 1)
+		_, _, _ = _sendMsg.Call(_permChkHwnd, WM_SETFONT, _permFSml, 1)
 	}
 
 	// 按钮 — 水平居中
@@ -351,10 +346,10 @@ func runDarkDialog(header, body string, buttons []permBtn,
 		}
 		bx := startX + i*(btnW+gap)
 		bh := _permCtl(hwnd, "BUTTON", b.text, st, b.id, bx, btnY, btnW, btnH)
-		_sendMsg.Call(bh, WM_SETFONT, _permFSml, 1)
+		_, _, _ = _sendMsg.Call(bh, WM_SETFONT, _permFSml, 1)
 	}
 
-	_setFg.Call(hwnd)
+	_, _, _ = _setFg.Call(hwnd)
 
 	// ── 消息循环（不调用 TranslateMessage）──
 	var msg [7]uintptr
@@ -363,29 +358,13 @@ func runDarkDialog(header, body string, buttons []permBtn,
 		if has == 0 {
 			break
 		}
-		_dispMsg.Call(uintptr(unsafe.Pointer(&msg[0])))
+		_, _, _ = _dispMsg.Call(uintptr(unsafe.Pointer(&msg[0])))
 	}
 
 	if _permResultReady {
 		return _permResultBtnID, _permResultRemember
 	}
 	return -1, false
-}
-
-// ═══════════════════════════ 通知消息框 ═══════════════════════════
-
-func notifyHost(title, msg string, isWarning bool) {
-	flags := uintptr(MB_OK | MB_TOPMOST)
-	if isWarning {
-		flags |= MB_ICONWARN
-	} else {
-		flags |= MB_ICONINFO
-	}
-	_msgBox.Call(0,
-		uintptr(unsafe.Pointer(_u16(msg))),
-		uintptr(unsafe.Pointer(_u16(title))),
-		flags,
-	)
 }
 
 // ═══════════════════════════ 权限管理 ═══════════════════════════
@@ -431,7 +410,7 @@ func closeActiveDialog() {
 	activeDlgMu.Unlock()
 
 	if hwnd != 0 && threadId != 0 {
-		_postThreadMsg.Call(uintptr(threadId), WM_QUIT, 0, 0)
+		_, _, _ = _postThreadMsg.Call(uintptr(threadId), WM_QUIT, 0, 0)
 	}
 }
 
