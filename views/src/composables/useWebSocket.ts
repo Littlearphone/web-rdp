@@ -52,9 +52,12 @@ export function useWebSocket() {
         }
 
         // 编码格式通知（初始连接或切换编码器）
+        // 如果浏览器不支持 WebCodecs，忽略后端的 H.264 通知，坚持用 JPEG
         if (s.format) {
-          if (store.streamFormat !== s.format) {
-            store.streamFormat = s.format as StreamFormat;
+          const wanted = s.format as StreamFormat;
+          if (wanted === 'h264' && !store.canH264) return;
+          if (store.streamFormat !== wanted) {
+            store.streamFormat = wanted;
             store.connectionStatus = 'switching';
           }
           return; // 格式消息不含 stats

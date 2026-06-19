@@ -109,12 +109,14 @@ func doKey(code string, down bool) {
 }
 
 // doRightClick 在指定屏幕坐标执行鼠标右键单击（先移动光标再点击）
+// doRightClick 在指定屏幕坐标执行鼠标右键单击（先移动光标再点击）。
+// mouse_event 是队列化的，SetCursorPos 是同步的，无需长等待。
+// 仅保留按键抬起前的短间隔（15ms），确保应用能识别为一次完整点击。
 func doRightClick(x, y int32) {
 	ix, iy := uintptr(x), uintptr(y)
 	_, _, _ = procSetCursorPos.Call(ix, iy)
-	time.Sleep(30 * time.Millisecond)
 	_, _, _ = procMouseWait.Call(0x0008, ix, iy, 0, 0) // RIGHTDOWN
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(15 * time.Millisecond)
 	_, _, _ = procMouseWait.Call(0x0010, ix, iy, 0, 0) // RIGHTUP
 }
 
@@ -139,17 +141,21 @@ func releaseControl(user string) {
 	}
 }
 
-// doDrag 模拟鼠标拖拽操作：从 (x1,y1) 按下左键并移动到 (x2,y2) 后释放
+// doDrag 模拟鼠标拖拽操作：从 (x1,y1) 按下左键并移动到 (x2,y2) 后释放。
+// SetCursorPos 是同步的（调用后光标已在目标位置），但 mouse_event 是队列化的 ——
+// 系统需要时间将 LEFTDOWN 派发到目标窗口后，后续的 WM_MOUSEMOVE（由 SetCursorPos
+// 生成）才能携带按下状态，从而被窗口管理器识别为拖拽。
+// 因此必须在 LEFTDOWN 之后、SetCursorPos 之前插入延迟。
 func doDrag(x1, y1, x2, y2 int32) {
 	ix1, iy1 := uintptr(x1), uintptr(y1)
 	ix2, iy2 := uintptr(x2), uintptr(y2)
 	_, _, _ = procSetCursorPos.Call(ix1, iy1)
-	time.Sleep(30 * time.Millisecond)
-	_, _, _ = procMouseWait.Call(0x0002, ix1, iy1, 0, 0) // LEFTDOWN
-	time.Sleep(30 * time.Millisecond)
-	_, _, _ = procSetCursorPos.Call(ix2, iy2) // move
-	time.Sleep(30 * time.Millisecond)
-	_, _, _ = procMouseWait.Call(0x0004, ix2, iy2, 0, 0) // LEFTUP
+	time.Sleep(15 * time.Millisecond)
+	_, _, _ = procMouseWait.Call(0x0002, 0, 0, 0, 0) // LEFTDOWN
+	time.Sleep(15 * time.Millisecond)
+	_, _, _ = procSetCursorPos.Call(ix2, iy2) // 移动光标到目标位置（产生 WM_MOUSEMOVE）
+	time.Sleep(15 * time.Millisecond)
+	_, _, _ = procMouseWait.Call(0x0004, 0, 0, 0, 0) // LEFTUP
 }
 
 // RECT 定义 Windows RECT 结构体，用于 EnumDisplayMonitors 回调
@@ -180,6 +186,8 @@ type ctrlMsg struct {
 	MY        *int    `json:"my,omitempty"`
 	Webcodecs *bool   `json:"webcodecs,omitempty"`
 	Fps       *int    `json:"fps,omitempty"`
+	MouseBtn  *string `json:"mb,omitempty"` // 鼠标按钮: "left" / "right"
+	MouseDn   *bool   `json:"md,omitempty"` // true=按下 / false=释放
 }
 
 // statsMsg 定义性能统计消息，每秒由后端推送到前端用于状态栏展示
@@ -270,10 +278,9 @@ func main() {
 		}
 		ix, iy := int32(x), int32(y)
 		_, _, _ = procSetCursorPos.Call(uintptr(ix), uintptr(iy))
-		time.Sleep(30 * time.Millisecond)
-		_, _, _ = procMouseWait.Call(uintptr(0x0002), uintptr(ix), uintptr(iy), 0, 0)
-		time.Sleep(50 * time.Millisecond)
-		_, _, _ = procMouseWait.Call(uintptr(0x0004), uintptr(ix), uintptr(iy), 0, 0)
+		_, _, _ = procMouseWait.Call(uintptr(0x0002), uintptr(ix), uintptr(iy), 0, 0) // LEFTDOWN
+		time.Sleep(15 * time.Millisecond)
+		_, _, _ = procMouseWait.Call(uintptr(0x0004), uintptr(ix), uintptr(iy), 0, 0) // LEFTUP
 	})
 
 	addr := fmt.Sprintf("%s:%d", listen, port)

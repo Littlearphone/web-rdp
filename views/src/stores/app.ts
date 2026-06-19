@@ -91,7 +91,8 @@ export const useAppStore = defineStore('app', () => {
       quality: currentQ.value,
       maxw: currentMW.value,
       fps: currentFPS.value,
-      webcodecs: useH264.value,
+      // 仅在浏览器支持 WebCodecs 时才告知后端使用 H.264
+      webcodecs: useH264.value && typeof VideoDecoder !== 'undefined',
     });
   }
 

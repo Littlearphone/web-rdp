@@ -293,11 +293,12 @@ func runDarkDialog(header, body string, buttons []permBtn,
 		y = 0
 	}
 
-	// 无 WS_CAPTION —— 和 dlgcheck.go 一样，完全自绘深色背景
+	// 无 WS_CAPTION — 完全自绘深色背景，但标题仍需传给 CreateWindowExW
+	// 用于在任务栏和 Alt+Tab 中显示窗口名称
 	hwnd, _, _ := _cwEx.Call(
 		uintptr(WS_EX_TOPMOST|WS_EX_CONTROLPARENT),
 		uintptr(unsafe.Pointer(_u16("RDPPermDarkV1"))),
-		0, // 无窗口标题
+		uintptr(unsafe.Pointer(_u16(header))),
 		uintptr(WS_POPUP|WS_VISIBLE),
 		uintptr(x), uintptr(y), uintptr(dlgW), uintptr(dlgH),
 		0, 0, _inst(), 0,

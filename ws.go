@@ -133,6 +133,22 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				if cm.MX != nil && cm.MY != nil && hasControl(userName) {
 					_, _, _ = procSetCursorPos.Call(uintptr(*cm.MX), uintptr(*cm.MY))
 				}
+				if cm.MouseBtn != nil && cm.MouseDn != nil && hasControl(userName) {
+					switch *cm.MouseBtn {
+					case "left":
+						if *cm.MouseDn {
+							_, _, _ = procMouseWait.Call(0x0002, 0, 0, 0, 0) // LEFTDOWN
+						} else {
+							_, _, _ = procMouseWait.Call(0x0004, 0, 0, 0, 0) // LEFTUP
+						}
+					case "right":
+						if *cm.MouseDn {
+							_, _, _ = procMouseWait.Call(0x0008, 0, 0, 0, 0) // RIGHTDOWN
+						} else {
+							_, _, _ = procMouseWait.Call(0x0010, 0, 0, 0, 0) // RIGHTUP
+						}
+					}
+				}
 				if cm.Webcodecs != nil {
 					useH264.Store(*cm.Webcodecs && currentH264Encoder() != "")
 				}
@@ -165,7 +181,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 						closeActiveDialog()
 					}
 				}
-				if cm.DX1 != nil && hasControl(userName) {
+				if cm.DX1 != nil && cm.DY1 != nil && cm.DX2 != nil && cm.DY2 != nil && hasControl(userName) {
 					doDrag(int32(*cm.DX1), int32(*cm.DY1), int32(*cm.DX2), int32(*cm.DY2))
 				}
 				continue
