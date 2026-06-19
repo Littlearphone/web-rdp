@@ -201,7 +201,7 @@ func startFFmpeg(id, quality, maxW, fps int, h264 bool) *ffSession {
 	ff := &ffSession{
 		cmd:        cmd,
 		stdout:     bufio.NewReaderSize(stdout, 256*1024),
-		frameCh:    make(chan []byte, 16),
+		frameCh:    make(chan []byte, 3),
 		stopCh:     make(chan struct{}),
 		stderrBuf:  new(bytes.Buffer),
 		stderrDone: make(chan struct{}),
