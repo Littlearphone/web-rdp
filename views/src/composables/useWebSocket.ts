@@ -1,7 +1,7 @@
 /**
  * WebSocket 连接管理
  *
- * 负责生命周期管理：连接、消息路由、自动重连（指数退避）。
+ * 负责生命周期管理：连接、认证握手、消息路由、自动重连（指数退避）。
  * 文本消息 → 更新 Pinia store
  * 二进制消息 → 委托给注册的 binaryHandler
  */
@@ -18,8 +18,32 @@ export function registerBinaryHandler(fn: BinaryHandler) {
   binaryHandler = fn;
 }
 
+/** SHA-256 摘要（用于认证 challenge-response） */
+async function sha256Hex(s: string): Promise<string> {
+  const buf = new TextEncoder().encode(s);
+  const hash = await crypto.subtle.digest('SHA-256', buf);
+  return Array.from(new Uint8Array(hash))
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
 export function useWebSocket() {
   const store = useAppStore();
+
+  // ═══════════════════════════════════════════
+  // 剪贴板
+  // ═══════════════════════════════════════════
+
+  /** 从远端同步剪贴板文本到浏览器 */
+  async function applyRemoteClipboard(text: string) {
+    if (text === store.remoteClipboard) return;
+    store.remoteClipboard = text;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (_) {
+      // 非 HTTPS 或权限不足时静默失败
+    }
+  }
 
   // ═══════════════════════════════════════════
   // WebSocket 消息处理
@@ -30,11 +54,16 @@ export function useWebSocket() {
       try {
         const s = JSON.parse(event.data) as InitMsg & StatsMsg & ControlStatusMsg;
 
+        // 剪贴板推送（后端 → 前端）
+        if (s.clipboard) {
+          applyRemoteClipboard(s.clipboard);
+          return;
+        }
+
         // 控制权限状态
         if (s.control_status) {
           store.controlStatus = s.control_status;
           store.controlMsg = s.control_msg || '';
-          // granted/denied/busy 2 秒后重置为空闲（让提示消息有一定展示时间）
           if (s.control_status === 'granted' || s.control_status === 'denied' || s.control_status === 'busy') {
             setTimeout(() => {
               if (store.controlStatus === s.control_status) {
@@ -43,7 +72,6 @@ export function useWebSocket() {
               }
             }, 2000);
           }
-          // pending 60 秒超时兜底：防止宿主弹窗异常消失后客户端永久卡住
           if (s.control_status === 'pending') {
             setTimeout(() => {
               if (store.controlStatus === 'pending') {
@@ -52,7 +80,7 @@ export function useWebSocket() {
               }
             }, 60000);
           }
-          return; // 控制状态消息不含其他数据
+          return;
         }
 
         // 用户名（首次连接）
@@ -61,7 +89,6 @@ export function useWebSocket() {
         }
 
         // 编码格式通知（初始连接或切换编码器）
-        // 如果浏览器不支持 WebCodecs，忽略后端的 H.264 通知，坚持用 JPEG
         if (s.format) {
           const wanted = s.format as StreamFormat;
           if (wanted === 'h264' && !store.canH264) return;
@@ -69,7 +96,6 @@ export function useWebSocket() {
             store.streamFormat = wanted;
             store.connectionStatus = 'switching';
           }
-          // 后端下发实际会话参数，同步 UI（加入已有会话时可能不同于本地默认值）
           if (s.quality !== undefined) store.currentQ = s.quality;
           if (s.maxw !== undefined) store.currentMW = s.maxw;
           if (s.fps !== undefined) store.currentFPS = s.fps;
@@ -86,17 +112,14 @@ export function useWebSocket() {
         store.statsMaxRate = s.maxrate || 0;
         if (s.users !== undefined) store.statsUsers = s.users;
 
-        // 控制权
         if (s.owner !== undefined) {
           store.statsOwner = s.owner;
         }
 
-        // 屏幕元数据（JPEG 路径通过帧头获取，这里做 fallback）
         if (s.ox !== undefined) {
           store.meta = { ox: s.ox, oy: s.oy, pw: s.w, ph: s.h, zoom: s.zoom };
         }
 
-        // 屏幕数量变化
         if (s.screens > 0 && s.screens !== store.screenCount) {
           store.screenCount = s.screens;
           store.mobileUIBuilt = false;
@@ -116,9 +139,11 @@ export function useWebSocket() {
   // ═══════════════════════════════════════════
 
   let savedUser = '';
+  let savedPassword = ''; // 用户在弹窗中输入的密码（会话内记忆，用于重连）
 
-  function connect(user?: string) {
+  function connect(user?: string, password?: string) {
     if (user) savedUser = user;
+    if (password !== undefined) savedPassword = password;
     // 关闭旧连接
     if (store.ws) {
       store.ws.onclose = null;
@@ -138,17 +163,62 @@ export function useWebSocket() {
     const wsInst = new WebSocket(wsUrl);
     wsInst.binaryType = 'arraybuffer';
 
+    // ── 认证握手状态机 ──
+    let authDone = false;
+
     wsInst.onopen = () => {
       store.wasConnected = true;
       store.connectionStatus = 'connected';
       store.reconnectDelay = 5;
-      store.sendSettings();
+
+      // 首条消息一定是 {challenge} 或 {user, format}
+      // 我们把消息处理器临时包装一层来拦截首条消息
+      const origHandler = wsInst.onmessage;
+      wsInst.onmessage = async (ev: MessageEvent) => {
+        if (authDone) {
+          origHandler?.call(wsInst, ev);
+          return;
+        }
+
+        if (typeof ev.data === 'string') {
+          try {
+            const init = JSON.parse(ev.data);
+            // 收到 challenge → 需要认证
+            if (init.challenge) {
+              const challenge = init.challenge;
+              let authToken: string;
+              if (savedPassword) {
+                authToken = await sha256Hex(challenge + savedPassword);
+              } else {
+                authToken = 'anonymous';
+              }
+              store.send({ auth: authToken });
+              authDone = true;
+              // 恢复原始处理器，后续消息（包含 user/format）正常处理
+              wsInst.onmessage = origHandler;
+              return;
+            }
+          } catch (_) {}
+        }
+
+        // 无 challenge → 无需认证，直接进入正常流程
+        authDone = true;
+        wsInst.onmessage = origHandler;
+        origHandler?.call(wsInst, ev);
+      };
     };
 
     wsInst.onmessage = onMessage;
 
-    wsInst.onclose = () => {
+    wsInst.onclose = (ev: CloseEvent) => {
       store.connectionStatus = 'disconnected';
+      // 4001 = 同 IP 新连接顶替，不重连
+      // 不在此处设置 wasConnected = false，由 App.vue 的 watch 检测并弹出登录框
+      if (ev.code === 4001) {
+        store.clearReconnectTimer();
+        store.showReconnectHint = false;
+        return;
+      }
       if (store.wasConnected) {
         startReconnect();
       }
@@ -194,11 +264,11 @@ export function useWebSocket() {
   // 初始化
   // ═══════════════════════════════════════════
 
-  function init(user: string) {
+  function init(user: string, password?: string) {
     store.isMobile =
       /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) &&
       window.innerWidth <= 900;
-    connect(user);
+    connect(user, password);
   }
 
   return { connect, manualReconnect, init };

@@ -64,8 +64,11 @@ export function useKeyboardCapture() {
     if (!store.statsOwner) return;
     // WebSocket 断开时不拦截任何按键，确保浏览器快捷键（F5 刷新等）正常
     if (!wsOpen()) return;
+    // 输入框聚焦时放行所有组合键，确保 Ctrl+V 粘贴等正常工作
+    const tag = (e.target as HTMLElement)?.tagName;
+    const isInput = tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement)?.isContentEditable;
+    if (isInput) return;
     // 阻止默认行为但不阻止传播 — 浏览器需要事件正常传播来维护内部键盘状态
-    // （e.ctrlKey/e.altKey/e.metaKey 依赖浏览器正确追踪修饰键）
     if (PREVENT_KEYS.has(e.code) || e.ctrlKey || e.altKey || e.metaKey) {
       e.preventDefault();
     }

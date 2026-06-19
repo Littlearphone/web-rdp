@@ -5,10 +5,12 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"embed"
+	"encoding/hex"
 	"encoding/pem"
 	"flag"
 	"fmt"
@@ -26,6 +28,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/gorilla/websocket"
 )
@@ -82,6 +85,25 @@ var (
 	procEnumDisplaySettings = user32.NewProc("EnumDisplaySettingsW") // 逐显示器读取 DEVMODE
 	procEnumDisplayDevices  = user32.NewProc("EnumDisplayDevicesW")  // 枚举显示设备列表
 	procGetMonitorInfo      = user32.NewProc("GetMonitorInfoW")      // 获取 HMONITOR 信息（含设备名）
+
+	// 剪贴板 API
+	kernel32                       = syscall.NewLazyDLL("kernel32.dll")
+	procOpenClipboard              = user32.NewProc("OpenClipboard")
+	procCloseClipboard             = user32.NewProc("CloseClipboard")
+	procEmptyClipboard             = user32.NewProc("EmptyClipboard")
+	procGetClipboardData           = user32.NewProc("GetClipboardData")
+	procSetClipboardData           = user32.NewProc("SetClipboardData")
+	procGetClipboardSequenceNumber = user32.NewProc("GetClipboardSequenceNumber")
+	procGlobalLock                 = kernel32.NewProc("GlobalLock")
+	procGlobalUnlock               = kernel32.NewProc("GlobalUnlock")
+	procGlobalAlloc                = kernel32.NewProc("GlobalAlloc")
+	procGlobalSize                 = kernel32.NewProc("GlobalSize")
+	procRtlMoveMemory              = kernel32.NewProc("RtlMoveMemory")
+
+	// 认证
+	authPassword string                    // 预设密码（空 = 自动生成随机密码）
+	authNonces   = make(map[string]string) // challenge nonce 池，key 为 nonce ID
+	authNoncesMu sync.Mutex
 )
 
 // keyCodeMap 将浏览器 KeyboardEvent.code 映射为 Windows 虚拟键码（VK）
@@ -146,11 +168,20 @@ func doRightClick(x, y int32) {
 
 // acquireControl 尝试获取远程控制权。同一用户可重复获取；其他用户需等待当前持有者释放。
 // 返回 true 表示获取成功，false 表示被其他用户占用
-func acquireControl(user string) bool {
+func acquireControl(user string) bool { return acquireControlForce(user, false) }
+
+// acquireControlForce 获取或顶替控制权。force=true 时无视当前持有者直接抢占。
+func acquireControlForce(user string, force bool) bool {
 	controlMu.Lock()
 	defer controlMu.Unlock()
 	if controlOwner == "" || controlOwner == user {
 		controlOwner = user
+		return true
+	}
+	if force {
+		oldOwner := controlOwner
+		controlOwner = user
+		log.Printf("[%s] 控制权被 %s 顶替", oldOwner, user)
 		return true
 	}
 	return false
@@ -182,6 +213,133 @@ func doDrag(x1, y1, x2, y2 int32) {
 	_, _, _ = procMouseWait.Call(0x0004, 0, 0, 0, 0) // LEFTUP
 }
 
+// ── 剪贴板操作（纯轮询，无 LockOSThread）──
+
+// getClipboardSeq 获取剪贴板序列号（每次内容变化时自增）。
+// 无需 OpenClipboard，任意线程可安全调用。
+func getClipboardSeq() uint32 {
+	s, _, _ := procGetClipboardSequenceNumber.Call()
+	return uint32(s)
+}
+
+// clipLock 保护剪贴板 Open/Close 配对操作的互斥锁
+var clipLock sync.Mutex
+
+// getClipboardText 以 Unicode 文本格式读取剪贴板内容。
+// 返回空字符串表示剪贴板中没有文本数据或读取失败。
+func getClipboardText() string {
+	clipLock.Lock()
+	defer clipLock.Unlock()
+
+	r, _, _ := procOpenClipboard.Call(0) // NULL hWnd = 当前任务窗口
+	if r == 0 {
+		return ""
+	}
+	defer procCloseClipboard.Call()
+
+	// CF_UNICODETEXT = 13
+	h, _, _ := procGetClipboardData.Call(13)
+	if h == 0 {
+		return ""
+	}
+	p, _, _ := procGlobalLock.Call(h)
+	if p == 0 {
+		return ""
+	}
+	defer procGlobalUnlock.Call(h)
+
+	sz, _, _ := procGlobalSize.Call(h)
+	if sz == 0 || sz > 10*1024*1024 { // 上限 10MB，防止异常数据
+		return ""
+	}
+	// UTF-16LE → Go string，去除末尾 null 终止符
+	buf := make([]uint16, sz/2)
+	procRtlMoveMemory.Call(uintptr(unsafe.Pointer(&buf[0])), p, sz)
+	return syscall.UTF16ToString(buf)
+}
+
+// setClipboardText 将文本写入剪贴板（Unicode）。
+func setClipboardText(text string) error {
+	clipLock.Lock()
+	defer clipLock.Unlock()
+
+	r, _, _ := procOpenClipboard.Call(0)
+	if r == 0 {
+		return fmt.Errorf("OpenClipboard failed")
+	}
+	defer procCloseClipboard.Call()
+
+	_, _, _ = procEmptyClipboard.Call()
+
+	u16, _ := syscall.UTF16FromString(text)
+	byteLen := uintptr(len(u16) * 2)
+	hMem, _, _ := procGlobalAlloc.Call(0x0002, byteLen) // GMEM_MOVEABLE
+	if hMem == 0 {
+		return fmt.Errorf("GlobalAlloc failed")
+	}
+	p, _, _ := procGlobalLock.Call(hMem)
+	if p == 0 {
+		procGlobalUnlock.Call(hMem)
+		return fmt.Errorf("GlobalLock failed")
+	}
+	procRtlMoveMemory.Call(p, uintptr(unsafe.Pointer(&u16[0])), byteLen)
+	procGlobalUnlock.Call(hMem)
+
+	// CF_UNICODETEXT = 13
+	d, _, _ := procSetClipboardData.Call(13, hMem)
+	if d == 0 {
+		return fmt.Errorf("SetClipboardData failed")
+	}
+	return nil
+}
+
+// ── 认证 ──
+
+// genNonce 生成随机挑战字符串，存入池中并返回给客户端。
+// 同一字符串同时作为 map key 和 challenge 值，客户端用它计算 SHA-256(challenge+password)。
+func genNonce() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	challenge := hex.EncodeToString(b)
+	authNoncesMu.Lock()
+	authNonces[challenge] = challenge // key==value，发下去的就是 challenge 本身
+	authNoncesMu.Unlock()
+	return challenge
+}
+
+// verifyAuth 验证客户端提交的 auth token。
+func verifyAuth(challenge, response, password string) bool {
+	authNoncesMu.Lock()
+	_, ok := authNonces[challenge]
+	if ok {
+		delete(authNonces, challenge) // 一次性使用，防重放
+	}
+	authNoncesMu.Unlock()
+	if !ok {
+		return false
+	}
+	expected := sha256Hex(challenge + password)
+	return expected == response
+}
+
+// sha256Hex 计算 SHA-256 并以十六进制字符串返回
+func sha256Hex(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
+}
+
+// generateRandomPassword 生成 12 位可读随机密码（含大小写字母和数字）
+func generateRandomPassword() string {
+	const chars = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+	b := make([]byte, 12)
+	for i := range b {
+		r := make([]byte, 1)
+		_, _ = rand.Read(r)
+		b[i] = chars[int(r[0])%len(chars)]
+	}
+	return string(b)
+}
+
 // RECT 定义 Windows RECT 结构体，用于 EnumDisplayMonitors 回调
 type RECT struct{ Left, Top, Right, Bottom int32 }
 
@@ -210,9 +368,11 @@ type ctrlMsg struct {
 	MY        *int    `json:"my,omitempty"`
 	Webcodecs *bool   `json:"webcodecs,omitempty"`
 	Fps       *int    `json:"fps,omitempty"`
-	MouseBtn  *string `json:"mb,omitempty"`   // 鼠标按钮: "left" / "right"
-	MouseDn   *bool   `json:"md,omitempty"`   // true=按下 / false=释放
-	User      *string `json:"user,omitempty"` // 修改用户名
+	MouseBtn  *string `json:"mb,omitempty"`        // 鼠标按钮: "left" / "right"
+	MouseDn   *bool   `json:"md,omitempty"`        // true=按下 / false=释放
+	User      *string `json:"user,omitempty"`      // 修改用户名
+	Clipboard *string `json:"clipboard,omitempty"` // 剪贴板文本（双向同步）
+	Auth      *string `json:"auth,omitempty"`      // 认证响应: sha256(challenge+password) 或 "anonymous"
 }
 
 // statsMsg 定义性能统计消息，每秒由后端推送到前端用于状态栏展示
@@ -331,12 +491,14 @@ func main() {
 		listen    string // 监听地址
 		ffmpegArg string // 手动指定的 ffmpeg 路径
 		useTLS    bool   // 是否启用 HTTPS（自动生成自签名证书）
+		password  string // 访问密码
 	)
 	flag.StringVar(&proxy, "proxy", "", "HTTP 代理地址 (用于下载 ffmpeg)")
 	flag.IntVar(&port, "port", 9000, "监听端口")
 	flag.StringVar(&listen, "listen", "", "监听地址 (默认所有网卡)")
 	flag.StringVar(&ffmpegArg, "ffmpeg", "", "手动指定 ffmpeg.exe 路径")
 	flag.BoolVar(&useTLS, "tls", true, "启用 HTTPS，-tls=false 禁用（自签名证书，局域网 H.264 需要）")
+	flag.StringVar(&password, "password", "", "访问密码（空=随机生成，0=无需密码）")
 	flag.Usage = func() {
 		o := flag.CommandLine.Output()
 		fmt.Fprintf(o, "Web 远程控制 v1.0\n\n用法: %s [选项]\n\n选项:\n", os.Args[0])
@@ -344,6 +506,21 @@ func main() {
 		fmt.Fprint(o, "\n示例:\n  web-rdp.exe                                    默认 HTTPS :9000\n  web-rdp.exe -port 8080                          指定端口\n  web-rdp.exe -listen 127.0.0.1                   仅本机\n  web-rdp.exe -ffmpeg C:\\tools\\ffmpeg.exe         手动指定 ffmpeg\n  web-rdp.exe -proxy :7890                        走代理下载\n  web-rdp.exe -tls=false                          禁用 HTTPS，回退 HTTP\n")
 	}
 	flag.Parse()
+
+	// ── 密码初始化 ──
+	if password == "0" {
+		authPassword = "" // 无需密码
+		fmt.Println("⚠ 无需密码模式：任何人可直接连接（仅建议内网使用）")
+	} else if password != "" {
+		authPassword = password
+		fmt.Printf("→ 使用预设密码进行访问控制\n")
+	} else {
+		authPassword = generateRandomPassword()
+		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+		fmt.Printf("  随机访问密码: %s\n", authPassword)
+		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+	}
+	fmt.Println()
 
 	// ── 证书加载 / 生成 ──
 	// 证书存放在 %APPDATA%/web-rdp/ 下，与系统规范一致

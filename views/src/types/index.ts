@@ -37,6 +37,8 @@ export interface CtrlMsg {
   webcodecs?: boolean;
   fps?: number;
   user?: string;
+  clipboard?: string;
+  auth?: string;
 }
 
 /** 性能统计消息（后端每秒推送） */
@@ -63,6 +65,8 @@ export interface InitMsg {
   quality?: number;
   maxw?: number;
   fps?: number;
+  challenge?: string;
+  clipboard?: string;
 }
 
 /** 控制权限状态 */

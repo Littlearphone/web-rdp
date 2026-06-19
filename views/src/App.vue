@@ -41,6 +41,15 @@
           placeholder="输入用户名"
           @keyup.enter="onConfirmName"
         />
+        <p class="name-dialog-body" style="margin-top:16px; margin-bottom:4px;">
+          访问密码（可选，留空则请求宿主审批）
+        </p>
+        <n-input
+          v-model:value="tempPassword"
+          size="large"
+          placeholder="输入密码（留空=匿名访问）"
+          @keyup.enter="onConfirmName"
+        />
         <div class="name-dialog-actions">
           <n-button type="primary" size="medium" @click="onConfirmName">
             进入
@@ -53,7 +62,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, nextTick } from 'vue';
+import { ref, onMounted, nextTick, watch } from 'vue';
 import { darkTheme, zhCN, NConfigProvider, NNotificationProvider, NModal, NInput, NButton } from 'naive-ui';
 import { useAppStore } from '@/stores/app';
 import { useWebSocket } from '@/composables/useWebSocket';
@@ -74,19 +83,30 @@ if (!store.isMobile) {
 // ── 用户名弹窗 ──
 const showNameDialog = ref(true);
 const tempName = ref('用户' + Math.floor(1000 + Math.random() * 9000));
+const tempPassword = ref('');
 const nameInputRef = ref<InstanceType<typeof NInput> | null>(null);
 
 function onConfirmName() {
   const name = tempName.value.trim();
   if (!name) return;
   showNameDialog.value = false;
-  init(name);
+  const pwd = tempPassword.value.trim();
+  init(name, pwd || undefined);
 }
 
 onMounted(async () => {
-  // 自动聚焦输入框
   await nextTick();
   nameInputRef.value?.focus();
+});
+
+// 连接断开后回到初始弹窗，让用户可修改名字/密码后重新进入
+watch(() => store.connectionStatus, (status) => {
+  if ((status === 'disconnected' || status === 'failed') && store.wasConnected) {
+    store.wasConnected = false;
+    store.clearReconnectTimer();
+    store.showReconnectHint = false;
+    showNameDialog.value = true;
+  }
 });
 </script>
 

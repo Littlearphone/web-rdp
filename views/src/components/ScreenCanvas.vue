@@ -158,6 +158,27 @@ function onContextMenu(e: MouseEvent) {
   store.send({ rx: coords.fx, ry: coords.fy });
 }
 
+/** 粘贴事件：将浏览器剪贴板文本发送到远程 */
+function onPaste(e: ClipboardEvent) {
+  const text = e.clipboardData?.getData('text/plain');
+  if (text) {
+    store.send({ clipboard: text });
+  }
+}
+
+/** copy 事件：浏览器复制后同步到远程剪贴板 */
+function onCopy() {
+  // 延迟读取，确保 clipboard API 已更新
+  setTimeout(async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text && text !== store.remoteClipboard) {
+        store.send({ clipboard: text });
+      }
+    } catch (_) { /* 权限不足 */ }
+  }, 50);
+}
+
 function bindDesktopEvents() {
   const canvas = canvasRef.value;
   if (!canvas) return;
@@ -167,6 +188,9 @@ function bindDesktopEvents() {
   // 也能正常完成拖拽（释放时发送 dx1/dy1/dx2/dy2）
   window.addEventListener('mousemove', onMouseMove);
   window.addEventListener('mouseup', onMouseUp);
+  // 剪贴板事件
+  window.addEventListener('paste', onPaste);
+  window.addEventListener('copy', onCopy);
 }
 
 function unbindDesktopEvents() {
@@ -176,6 +200,8 @@ function unbindDesktopEvents() {
   canvas.removeEventListener('contextmenu', onContextMenu);
   window.removeEventListener('mousemove', onMouseMove);
   window.removeEventListener('mouseup', onMouseUp);
+  window.removeEventListener('paste', onPaste);
+  window.removeEventListener('copy', onCopy);
 }
 
 // ═══════════════════════════════════════════

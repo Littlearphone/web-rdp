@@ -86,13 +86,15 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
+  /** 剪贴板状态 */
+  const remoteClipboard = ref(''); // 最后一次从远端同步的剪贴板文本
+
   /** 发送当前设置（画质/分辨率/帧率/H.264） */
   function sendSettings() {
     send({
       quality: currentQ.value,
       maxw: currentMW.value,
       fps: currentFPS.value,
-      // 仅在浏览器支持 WebCodecs 时才告知后端使用 H.264
       webcodecs: useH264.value && typeof VideoDecoder !== 'undefined',
     });
   }
@@ -132,7 +134,7 @@ export const useAppStore = defineStore('app', () => {
     statsUser, statsFps, statsEncMs, statsKb, statsW, statsH, statsQ,
     statsOwner, statsMaxRate, statsUsers,
     mobileResOpts, mobileUIBuilt, lastResKey, isMobile,
-    controlStatus, controlMsg,
+    controlStatus, controlMsg, remoteClipboard,
     // 计算属性
     basePw, basePh, serverAddr, canH264,
     // 操作

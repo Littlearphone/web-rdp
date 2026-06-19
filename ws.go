@@ -31,6 +31,9 @@ var (
 	userMap     = make(map[string]string) // IP → 用户名映射
 	userMapMu   sync.Mutex                // 用户映射的互斥锁
 	connCount   atomic.Int32              // 当前活跃 WebSocket 连接数
+
+	activeConns   = make(map[string]*websocket.Conn) // IP → 当前活跃连接（同 IP 新连接顶替旧连接）
+	activeConnsMu sync.Mutex
 )
 
 // userNameFor 根据客户端 IP 获取或分配用户名。同一 IP 多次连接返回相同用户名
@@ -58,6 +61,17 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 	if idx := strings.LastIndex(ip, ":"); idx != -1 {
 		ip = ip[:idx]
 	}
+	// 同 IP 新连接顶替旧连接，避免同一人开多窗口被视为多用户
+	activeConnsMu.Lock()
+	if old, ok := activeConns[ip]; ok {
+		// 发送 4001 关闭码告知前端"被顶替，不要重连"，防止两个窗口无限互踢
+		_ = old.WriteMessage(websocket.CloseMessage,
+			websocket.FormatCloseMessage(4001, "同 IP 新连接替代"))
+		_ = old.Close()
+		log.Printf("[%s] 旧连接已关闭（同 IP 新连接顶替）", ip)
+	}
+	activeConns[ip] = conn
+	activeConnsMu.Unlock()
 	// 优先使用客户端指定的用户名（?user=XXX），否则按 IP 自动分配
 	userName := strings.TrimSpace(r.URL.Query().Get("user"))
 	if userName != "" {
@@ -71,17 +85,80 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 	log.Printf("[%s] 已连接 (%s)  在线 %d 人", userName, ip, connCount.Load())
 
 	defer func() {
+		// 清理本连接的 IP 注册（仅当 map 中仍指向此连接时）
+		activeConnsMu.Lock()
+		if activeConns[ip] == conn {
+			delete(activeConns, ip)
+		}
+		activeConnsMu.Unlock()
 		connCount.Add(-1)
 		log.Printf("[%s] 已断开  在线 %d 人", userName, connCount.Load())
 		if ff != nil {
 			ff.unsubscribe(subID)
 			releaseFFmpeg(curScreen)
 		}
-		// 断开时释放该用户的控制权
 		releaseControl(userName)
 		closeActiveDialog()
 		_ = conn.Close()
 	}()
+
+	// ── 认证握手 ──
+	if authPassword != "" {
+		challenge := genNonce()
+
+		if b, _ := json.Marshal(map[string]string{"challenge": challenge}); b != nil {
+			_ = conn.WriteMessage(websocket.TextMessage, b)
+		}
+
+		// 设置 30 秒认证超时
+		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		_, msgBytes, err := conn.ReadMessage()
+		_ = conn.SetReadDeadline(time.Time{}) // 清除超时
+		if err != nil {
+			log.Printf("[%s] 认证超时或读取失败: %v", userName, err)
+			return
+		}
+
+		var authMsg struct {
+			Auth *string `json:"auth"`
+		}
+		if json.Unmarshal(msgBytes, &authMsg) != nil || authMsg.Auth == nil {
+			log.Printf("[%s] 无效的认证消息", userName)
+			return
+		}
+
+		authToken := *authMsg.Auth
+		if authToken == "anonymous" {
+			// 匿名访问 → 弹出宿主审批弹窗
+			log.Printf("[%s] 请求匿名访问，等待宿主审批...", userName)
+			done := make(chan struct {
+				allowed   bool
+				grantCtrl bool
+			}, 1)
+			go doRequestAccessWithDialog(userName, func(allowed bool, grantCtrl bool) {
+				done <- struct {
+					allowed   bool
+					grantCtrl bool
+				}{allowed, grantCtrl}
+			})
+			result := <-done
+			if !result.allowed {
+				log.Printf("[%s] 匿名访问被宿主拒绝", userName)
+				return
+			}
+			log.Printf("[%s] 匿名访问已批准 (grantCtrl=%v)", userName, result.grantCtrl)
+		} else {
+			// 密码认证
+			if !verifyAuth(challenge, authToken, authPassword) {
+				log.Printf("[%s] 密码验证失败", userName)
+				return
+			}
+			log.Printf("[%s] 密码验证通过", userName)
+		}
+	} else {
+		// 无需密码模式：直接通过
+		log.Printf("[%s] 无需密码模式，直接通过", userName)
+	}
 
 	// ── 发送用户名 + 编码格式 ──
 	useH264.Store(currentH264Encoder() != "") // 有可用 H.264 编码器则默认启用
@@ -114,6 +191,11 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 	// ── 控制消息接收 ──
 	var currentID, currentQuality, currentMaxW, currentFPS atomic.Int32
 	currentQuality.Store(75)
+
+	// 剪贴板防回环：记录最后一次同步的文本
+	var clipMu sync.Mutex
+	var lastClipSeq uint32
+	var lastClipText string
 
 	readErr := make(chan struct{})
 	go func() {
@@ -221,6 +303,15 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				if cm.DX1 != nil && cm.DY1 != nil && cm.DX2 != nil && cm.DY2 != nil && hasControl(userName) {
 					doDrag(int32(*cm.DX1), int32(*cm.DY1), int32(*cm.DX2), int32(*cm.DY2))
 				}
+				// 剪贴板同步（前端推送 → 写入本地）
+				if cm.Clipboard != nil && hasControl(userName) {
+					clipMu.Lock()
+					lastClipText = *cm.Clipboard
+					clipMu.Unlock()
+					if err := setClipboardText(*cm.Clipboard); err != nil {
+						log.Printf("剪贴板写入失败: %v", err)
+					}
+				}
 				continue
 			}
 			id, err := strconv.Atoi(string(msg))
@@ -248,6 +339,41 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 		cachedZoom   float64
 		cacheFrame   int
 	)
+
+	// ── 剪贴板轮询（本地变更 → 推送远端）──
+	clipTicker := time.NewTicker(500 * time.Millisecond)
+	go func() {
+		defer clipTicker.Stop()
+		for {
+			select {
+			case <-readErr:
+				return
+			case <-clipTicker.C:
+				seq := getClipboardSeq()
+				clipMu.Lock()
+				skip := seq == lastClipSeq
+				clipMu.Unlock()
+				if skip {
+					continue
+				}
+				text := getClipboardText()
+				clipMu.Lock()
+				lastClipSeq = seq
+				if text != "" && text != lastClipText {
+					lastClipText = text
+					clipMu.Unlock()
+					if b, _ := json.Marshal(map[string]string{"clipboard": text}); b != nil {
+						select {
+						case outCh <- wsMessage{websocket.TextMessage, b}:
+						default:
+						}
+					}
+				} else {
+					clipMu.Unlock()
+				}
+			}
+		}
+	}()
 
 	for {
 		id := int(currentID.Load())

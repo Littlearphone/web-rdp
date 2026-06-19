@@ -91,6 +91,7 @@ const (
 	BTN_DENY       = 102
 	BTN_DISCONNECT = 200
 	CHK_REMEMBER   = 300
+	CHK_GRANT_CTRL = 301 // 访问审批对话框的"授予控制权"复选框
 
 	// 深色主题
 	_bgR, _bgG, _bgB = 0x20, 0x20, 0x20
@@ -110,11 +111,13 @@ var (
 	_permTxClr = uintptr(uint32(_txR) | uint32(_txG)<<8 | uint32(_txB)<<16)
 
 	// 与 permWndProc 通信
-	_permResultBtnID    int
-	_permResultRemember bool
-	_permResultReady    bool
-	_permChkHwnd        uintptr
-	_permShowCheckbox   bool // 是否显示复选框
+	_permResultBtnID     int
+	_permResultRemember  bool
+	_permResultGrantCtrl bool
+	_permResultReady     bool
+	_permChkHwnd         uintptr
+	_permChkGrantHwnd    uintptr // "授予控制权"复选框句柄
+	_permShowCheckbox    bool    // 是否显示复选框
 )
 
 // 跨线程关闭支持
@@ -150,7 +153,7 @@ type iconInfo struct {
 	hbmColor uintptr
 }
 
-// drawMonitorIcon 用 GDI 绘制一个 48×48 的显示器图标，完全嵌入可执行文件。
+// drawMonitorIcon 用 GDI 绘制一个 48x48 的显示器图标，完全嵌入可执行文件。
 // 背景色与弹窗背景一致（#202020），整体协调不突兀。
 func drawMonitorIcon() uintptr {
 	hdc, _, _ := _getDC.Call(0)
@@ -252,6 +255,15 @@ func _permReadCheck() {
 	_permResultRemember = ck == 1
 }
 
+func _permReadGrantCheck() {
+	if _permChkGrantHwnd == 0 {
+		_permResultGrantCtrl = false
+		return
+	}
+	ck, _, _ := _sendMsg.Call(_permChkGrantHwnd, BM_GETCHECK, 0, 0)
+	_permResultGrantCtrl = ck == 1
+}
+
 func permWndProc(hwnd, msg, wp, lp uintptr) uintptr {
 	switch msg {
 	case WM_NCHITTEST:
@@ -262,7 +274,6 @@ func permWndProc(hwnd, msg, wp, lp uintptr) uintptr {
 		return r
 
 	case WM_ERASEBKGND:
-		// 用深色画刷填充整个客户区
 		var rc struct{ L, T, R, B int32 }
 		_, _, _ = _getClientRect.Call(hwnd, uintptr(unsafe.Pointer(&rc)))
 		_, _, _ = _fillRect.Call(wp, uintptr(unsafe.Pointer(&rc)), _permBgBr)
@@ -275,25 +286,25 @@ func permWndProc(hwnd, msg, wp, lp uintptr) uintptr {
 
 	case WM_COMMAND:
 		id := int(uint64(wp) & 0xFFFF)
-		if id == CHK_REMEMBER {
-			return 0
+		if id == CHK_REMEMBER || id == CHK_GRANT_CTRL {
+			return 0 // 复选框切换，不关闭窗口
 		}
 		if _permShowCheckbox {
 			_permReadCheck()
 		}
+		_permReadGrantCheck()
 		_permResultBtnID = id
 		_permResultReady = true
-		// ★ 先销毁窗口再退出消息循环，与 WM_CLOSE 路径一致。
-		// 不能只调 PostQuitMessage —— 那样窗口不会被销毁，会残留在屏幕上。
-		_, _, _ = _dstWnd.Call(hwnd) // DestroyWindow → WM_DESTROY → PostQuitMessage
+		_, _, _ = _dstWnd.Call(hwnd)
 		return 0
 
 	case WM_CLOSE:
 		if _permShowCheckbox {
 			_permReadCheck()
 		}
+		_permReadGrantCheck()
 		_permResultReady = true
-		_permResultBtnID = -1 // 非按钮关闭（任务栏右键等），通知调用方释放资源
+		_permResultBtnID = -1
 		_, _, _ = _dstWnd.Call(hwnd)
 		return 0
 
@@ -368,23 +379,22 @@ type permBtn struct {
 }
 
 // runDarkDialog 创建深色主题弹窗并运行消息循环。
-// 风格与 dlgcheck.go 一致：无系统标题栏，深色背景，WM_NCHITTEST 拖拽。
-// onCreated 在窗口创建后、消息循环开始前调用。
+// showGrantCheckbox=true 时额外渲染"同时授予控制权"复选框（位置在记住选择上方）。
 func runDarkDialog(header, body string, buttons []permBtn,
-	showCheckbox bool, onCreated func(hwnd uintptr), dlgW, dlgH int) (btnID int, remember bool) {
+	showCheckbox bool, showGrantCheckbox bool, onCreated func(hwnd uintptr), dlgW, dlgH int) (btnID int, remember bool, grantCtrl bool) {
 
-	// ★ 锁定 OS 线程
 	runtime.LockOSThread()
 
 	_permMu.Lock()
 	defer _permMu.Unlock()
 
 	if err := _permRegClass(); err != nil {
-		return -1, false
+		return -1, false, false
 	}
 
 	_permResultBtnID = 0
 	_permResultRemember = false
+	_permResultGrantCtrl = false
 	_permResultReady = false
 	_permShowCheckbox = showCheckbox
 
@@ -399,8 +409,6 @@ func runDarkDialog(header, body string, buttons []permBtn,
 		y = 0
 	}
 
-	// 无 WS_CAPTION — 完全自绘深色背景，但标题仍需传给 CreateWindowExW
-	// 用于在任务栏和 Alt+Tab 中显示窗口名称
 	hwnd, _, _ := _cwEx.Call(
 		uintptr(WS_EX_CONTROLPARENT),
 		uintptr(unsafe.Pointer(_u16("RDPPermDarkV1"))),
@@ -410,32 +418,46 @@ func runDarkDialog(header, body string, buttons []permBtn,
 		0, 0, _inst(), 0,
 	)
 	if hwnd == 0 {
-		return -1, false
+		return -1, false, false
 	}
 
 	if onCreated != nil {
 		onCreated(hwnd)
 	}
 
-	// 图标（大尺寸，从 mstsc.exe 提取）
+	// 图标
 	ic := _permCtl(hwnd, "STATIC", "", SS_ICON, 0, 40, 28, 48, 48)
 	_, _, _ = _sendMsg.Call(ic, STM_SETICON, _permIco, 0)
 
-	// 标题 — 大字体
+	// 标题
 	h1 := _permCtl(hwnd, "STATIC", header, SS_LEFT, 0, 108, 26, dlgW-118, 36)
 	_, _, _ = _sendMsg.Call(h1, WM_SETFONT, _permFBig, 1)
 
-	// 正文 — 中等字体
+	// 正文
 	h2 := _permCtl(hwnd, "STATIC", body, SS_LEFT, 0, 108, 68, dlgW-118, 20)
 	_, _, _ = _sendMsg.Call(h2, WM_SETFONT, _permFMid, 1)
 
-	// 复选框（可选）
+	// "同时授予控制权"复选框（在记住选择上方）
+	if showGrantCheckbox {
+		_permChkGrantHwnd = _permCtl(hwnd, "BUTTON", "同时授予控制权", WS_TABSTOP|BS_AUTOCHECKBOX, CHK_GRANT_CTRL, 108, 100, 220, 26)
+		_, _, _ = _sendMsg.Call(_permChkGrantHwnd, WM_SETFONT, _permFSml, 1)
+		// 默认勾选
+		_, _, _ = _sendMsg.Call(_permChkGrantHwnd, BM_GETCHECK+1, 1, 0) // BM_SETCHECK=0x00F1, BST_CHECKED=1
+	} else {
+		_permChkGrantHwnd = 0
+	}
+
+	// "记住我的选择"复选框
 	if showCheckbox {
-		_permChkHwnd = _permCtl(hwnd, "BUTTON", "记住我的选择", WS_TABSTOP|BS_AUTOCHECKBOX, CHK_REMEMBER, 108, 108, 220, 26)
+		ckY := 108
+		if showGrantCheckbox {
+			ckY = 130
+		}
+		_permChkHwnd = _permCtl(hwnd, "BUTTON", "记住我的选择", WS_TABSTOP|BS_AUTOCHECKBOX, CHK_REMEMBER, 108, ckY, 220, 26)
 		_, _, _ = _sendMsg.Call(_permChkHwnd, WM_SETFONT, _permFSml, 1)
 	}
 
-	// 按钮 — 水平居中
+	// 按钮
 	btnW, btnH, gap := 120, 38, 16
 	n := len(buttons)
 	totalW := (btnW+gap)*n - gap
@@ -455,7 +477,7 @@ func runDarkDialog(header, body string, buttons []permBtn,
 
 	_, _, _ = _setFg.Call(hwnd)
 
-	// ── 消息循环（不调用 TranslateMessage）──
+	// 消息循环
 	var msg [7]uintptr
 	for {
 		has, _, _ := _getMsg.Call(uintptr(unsafe.Pointer(&msg[0])), 0, 0, 0)
@@ -465,15 +487,12 @@ func runDarkDialog(header, body string, buttons []permBtn,
 		_, _, _ = _dispMsg.Call(uintptr(unsafe.Pointer(&msg[0])))
 	}
 
-	// ★ 解锁 OS 线程：消息循环已结束，不再需要固定线程。
-	// 必须在 return 前调用，否则 goroutine 退出时会直接终止 OS 线程，
-	// 导致线程池频繁创建/销毁，可能触发下一个弹窗的消息循环卡死。
 	runtime.UnlockOSThread()
 
 	if _permResultReady {
-		return _permResultBtnID, _permResultRemember
+		return _permResultBtnID, _permResultRemember, _permResultGrantCtrl
 	}
-	return -1, false
+	return -1, false, false
 }
 
 // ═══════════════════════════ 权限管理 ═══════════════════════════
@@ -517,10 +536,6 @@ func closeActiveDialog() {
 	activeDlgMu.Unlock()
 
 	if hwnd != 0 {
-		// ★ 发送 WM_CLOSE 而非 PostThreadMessage(WM_QUIT)。
-		// WM_QUIT 只退出消息循环但不销毁窗口 —— 窗口会变成孤儿窗口卡在屏幕上。
-		// WM_CLOSE 会触发 DestroyWindow → WM_DESTROY → PostQuitMessage，
-		// 既销毁窗口又退出消息循环。
 		_, _, _ = _sendMsg.Call(hwnd, WM_CLOSE, 0, 0)
 	}
 }
@@ -536,15 +551,13 @@ func showControlRequestDialog(userName string) (int, bool) {
 	header := fmt.Sprintf("「%s」请求远程控制权限", userName)
 	body := "请选择允许或拒绝此请求。\n勾选【记住我的选择】可将本次选择设为永久规则。"
 
-	// 注册 HWND，确保 closeActiveDialog() 可以在客户端断开时关闭此弹窗
-	btn, remember := runDarkDialog(header, body, buttons, true, func(hwnd uintptr) {
+	btn, remember, _ := runDarkDialog(header, body, buttons, true, false, func(hwnd uintptr) {
 		activeDlgMu.Lock()
 		activeDlgUser = userName
 		activeDlgHwnd = hwnd
 		activeDlgMu.Unlock()
 	}, 480, 220)
 
-	// 弹窗已关闭，清理全局状态（与 showActiveControlDialog 的 defer 对应）
 	activeDlgMu.Lock()
 	if activeDlgUser == userName {
 		activeDlgUser = ""
@@ -576,7 +589,7 @@ func showActiveControlDialog(userName string) {
 	header := fmt.Sprintf("「%s」正在控制此电脑", userName)
 	body := "点击「断开控制」可立即终止此用户的控制权限。"
 
-	btn, _ := runDarkDialog(header, body, buttons, false,
+	btn, _, _ := runDarkDialog(header, body, buttons, false, false,
 		func(hwnd uintptr) {
 			activeDlgMu.Lock()
 			activeDlgHwnd = hwnd
@@ -591,6 +604,35 @@ func showActiveControlDialog(userName string) {
 			releaseControl(user)
 		}
 	}
+}
+
+// showAccessRequestDialog 显示访问审批弹窗（匿名用户请求连接时）。
+// 比 showControlRequestDialog 多一个"同时授予控制权"复选框。
+// 返回: btnID, remember, grantCtrl
+func showAccessRequestDialog(userName string) (int, bool, bool) {
+	buttons := []permBtn{
+		{BTN_ALLOW, "允许访问", true},
+		{BTN_DENY, "拒绝", false},
+	}
+
+	header := fmt.Sprintf("「%s」请求访问此电脑", userName)
+	body := "该用户未提供密码，需要您的审批。\n勾选【同时授予控制权】可直接让其操控桌面。"
+
+	btn, remember, grantCtrl := runDarkDialog(header, body, buttons, true, true, func(hwnd uintptr) {
+		activeDlgMu.Lock()
+		activeDlgUser = userName
+		activeDlgHwnd = hwnd
+		activeDlgMu.Unlock()
+	}, 480, 250)
+
+	activeDlgMu.Lock()
+	if activeDlgUser == userName {
+		activeDlgUser = ""
+		activeDlgHwnd = 0
+	}
+	activeDlgMu.Unlock()
+
+	return btn, remember, grantCtrl
 }
 
 // ═══════════════════════════ 业务逻辑 ═══════════════════════════
@@ -620,9 +662,6 @@ func requestControl(userName string) string {
 }
 
 func doRequestControlWithDialog(userName string, onResult func(granted bool)) {
-	// defer recover 确保 onResult 一定会被调用，防止客户端永久卡在 pending 状态。
-	// Win32 消息循环/窗口过程可能因外部原因（如 DLL 卸载、窗口句柄失效等）panic，
-	// 此时必须在进程内兜底，通知客户端释放等待状态。
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("权限弹窗 panic: %v", r)
@@ -651,7 +690,43 @@ func doRequestControlWithDialog(userName string, onResult func(granted bool)) {
 		onResult(false)
 
 	default:
-		// 关闭窗口
 		onResult(false)
+	}
+}
+
+// doRequestAccessWithDialog 显示访问审批弹窗并处理结果。
+// grantCtrl: 宿主在弹窗中是否勾选了"同时授予控制权"。
+func doRequestAccessWithDialog(userName string, onResult func(allowed bool, grantCtrl bool)) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("访问审批弹窗 panic: %v", r)
+			onResult(false, false)
+		}
+	}()
+
+	btn, remember, grantCtrl := showAccessRequestDialog(userName)
+
+	switch btn {
+	case BTN_ALLOW:
+		if remember {
+			rememberChoice(userName, true, false)
+		}
+		// 如果勾选了"同时授予控制权"，用 force=true 顶替当前控制者
+		if grantCtrl {
+			if acquireControlForce(userName, true) {
+				go showActiveControlDialog(userName)
+			}
+		}
+		onResult(true, grantCtrl)
+
+	case BTN_DENY:
+		if remember {
+			rememberChoice(userName, false, true)
+		}
+		onResult(false, false)
+
+	default:
+		// 关闭窗口 = 拒绝
+		onResult(false, false)
 	}
 }
