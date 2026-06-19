@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Web 远程桌面控制（web-rdp）—— 通过浏览器远程控制 Windows 桌面。Go 后端捕获屏幕并通过 WebSocket 实时推流，Vue 3 前端解码渲染并捕获用户输入回传。
 
-**核心能力：** 屏幕查看 + 输入转发（键盘/鼠标/触控），无剪贴板同步、无文件传输、无音频传输。
+**核心能力：** 屏幕查看 + 输入转发（键盘/鼠标/触控）+ 双向文本剪贴板同步。无文件传输、无音频传输。
 
 ## 构建与开发命令
 
@@ -127,13 +127,13 @@ types/index.ts                  TypeScript 类型定义
 |------|----------|
 | 传输加密 | 默认 HTTPS/WSS，自签名 ECDSA P-256 证书（365 天有效期），可 `-tls=false` 禁用 |
 | 证书存储 | `%APPDATA%/web-rdp/cert.pem` + `key.pem`，密钥文件 `0600` 权限 |
-| 认证 | **无密码认证**，仅靠用户名标识（IP 映射 + `?user=` 参数），名称可随时更改 |
+| 认证 | 可选密码认证（`-password` 参数），challenge-response (SHA-256)。无密码时仅靠用户名标识（IP 映射 + `?user=` 参数），匿名用户需宿主审批 |
 | 控制权访问 | 单用户控制（`controlOwner` + 互斥锁），每次输入操作前检查 `hasControl(user)` |
 | 权限管理 | 内存白名单/黑名单（`alwaysAllow` / `permanentlyDeny`），Win32 深色弹窗请求/确认 |
 | WebSocket 来源 | `CheckOrigin` 返回 `true`（允许任意来源）—— 无 CSRF 保护 |
 | 文件权限 | 截图缓存 `0700`，PEM 密钥 `0600` |
 
-**已知安全风险：** 无密码认证、允许任意 WebSocket 来源、无连接限速/IP 冷却、无失败次数限制。
+**已知安全风险：** 允许任意 WebSocket 来源、无连接限速/IP 冷却、无失败次数限制。
 
 ## 输入事件支持
 
@@ -209,8 +209,8 @@ types/index.ts                  TypeScript 类型定义
 
 ### 核心功能缺失（高优先级）
 
-- [ ] **剪贴板同步**：双向文本剪贴板同步（前端 `navigator.clipboard` ↔ 后端 Windows Clipboard API）。优先实现文本，再扩展图片和文件。
-- [ ] **密码认证**：增加 `-password` 参数或环境变量认证，至少支持预设密码。扩展 Token 认证用于 API 场景。配合失败次数限制 + IP 冷却防暴力破解。
+- [x] **剪贴板同步**：双向文本剪贴板同步（前端 `navigator.clipboard` ↔ 后端 Windows Clipboard API）。已实现文本同步，待扩展图片和文件。
+- [x] **密码认证**：`-password` 参数，challenge-response (SHA-256) 认证。匿名用户（无密码）需宿主审批。待扩展：失败次数限制 + IP 冷却防暴力破解。
 - [ ] **音频传输**：后端 WASAPI Loopback 捕获系统音频 → ffmpeg Opus/AAC 编码 → 前端 Web Audio API 播放。与视频帧 PTS 时间戳对齐。
 
 ### 体验提升（中优先级）
