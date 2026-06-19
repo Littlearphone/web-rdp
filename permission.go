@@ -187,6 +187,7 @@ func permWndProc(hwnd, msg, wp, lp uintptr) uintptr {
 			_permReadCheck()
 		}
 		_permResultReady = true
+		_permResultBtnID = -1 // 非按钮关闭（任务栏右键等），通知调用方释放资源
 		_, _, _ = _dstWnd.Call(hwnd)
 		return 0
 
