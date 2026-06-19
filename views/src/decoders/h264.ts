@@ -4,6 +4,10 @@
  * 纯逻辑模块，不依赖 Vue。
  * 负责 Annex B → AVCC 转换 + VideoDecoder 生命周期管理。
  *
+ * 渲染策略：requestAnimationFrame 同步
+ *   解码回调仅暂存帧，rAF 中统一绘制，与显示器刷新率对齐，
+ *   同一 vsync 间隔内多个解码帧只绘制最后一帧（自动跳帧）。
+ *
  * 用法:
  *   const dec = createH264Decoder(canvas, onFirstFrame);
  *   dec.feed(arrayBuffer);  // 每次收到 WebSocket binary 消息时调用
@@ -29,6 +33,36 @@ export function createH264Decoder(
   let buf = new Uint8Array(0);
   let ts = 0;
   let firstDecode = false;
+
+  // ── rAF 渲染状态 ──
+  let pendingFrame: VideoFrame | null = null;
+  let rafId = 0;
+  let firstFrameFired = false;
+
+  /** 确保 rAF 已调度（幂等），仅在有 pending frame 时才执行 */
+  function ensureRaf() {
+    if (rafId !== 0) return;
+    rafId = requestAnimationFrame(() => {
+      rafId = 0;
+      const frame = pendingFrame;
+      pendingFrame = null;
+      if (!frame) return;
+
+      const pw = frame.displayWidth;
+      const ph = frame.displayHeight;
+      if (canvas.width !== pw || canvas.height !== ph) {
+        canvas.width = pw;
+        canvas.height = ph;
+      }
+      ctx.drawImage(frame, 0, 0);
+      frame.close();
+
+      if (!firstFrameFired) {
+        firstFrameFired = true;
+        onFirstFrame();
+      }
+    });
+  }
 
   // ── Annex B 起始码检测 ──
 
@@ -145,15 +179,12 @@ export function createH264Decoder(
 
     decoder = new VideoDecoder({
       output: (frame: VideoFrame) => {
-        const pw = frame.displayWidth;
-        const ph = frame.displayHeight;
-        if (canvas.width !== pw || canvas.height !== ph) {
-          canvas.width = pw;
-          canvas.height = ph;
+        // rAF 渲染：关闭上一帧，暂存当前帧
+        if (pendingFrame) {
+          pendingFrame.close();
         }
-        ctx.drawImage(frame, 0, 0);
-        frame.close();
-        onFirstFrame();
+        pendingFrame = frame;
+        ensureRaf();
       },
       error: (e: Error) => console.error('H264 解码错误:', e.message),
     });
@@ -171,7 +202,7 @@ export function createH264Decoder(
 
     ready = true;
     ts = 0;
-    firstDecode = true;
+    firstDecode = false;
 
     // IDR 已在缓冲中 → 裁剪到 IDR 位置
     if (firstIDR >= 0) {
@@ -186,6 +217,22 @@ export function createH264Decoder(
     if (decoder) {
       try { decoder.close(); } catch (_) { /* 已关闭 */ }
       decoder = null;
+    }
+  }
+
+  // ── 清理 rAF / pending 帧 ──
+
+  function cancelRaf() {
+    if (rafId !== 0) {
+      cancelAnimationFrame(rafId);
+      rafId = 0;
+    }
+  }
+
+  function dropPendingFrame() {
+    if (pendingFrame) {
+      pendingFrame.close();
+      pendingFrame = null;
     }
   }
 
@@ -257,15 +304,20 @@ export function createH264Decoder(
 
   /** 重置解码器 */
   function reset() {
+    cancelRaf();
+    dropPendingFrame();
     closeDecoder();
     buf = new Uint8Array(0);
     ready = false;
     ts = 0;
     firstDecode = false;
+    firstFrameFired = false;
   }
 
   /** 关闭解码器并释放资源 */
   function close() {
+    cancelRaf();
+    dropPendingFrame();
     closeDecoder();
   }
 
