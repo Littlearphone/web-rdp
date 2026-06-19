@@ -243,6 +243,11 @@ export function createH264Decoder(
     const sl = scLen(data, 0);
     if (data.length < sl + 1 || !decoder) return;
     const t = data[sl] & 0x1F;
+
+    // 队列保护：delta 帧在队列过长时跳过，防止解码延迟累积。
+    // key 帧（IDR）永不跳过 — 它是解码器恢复同步的锚点。
+    if (t !== 5 && decoder.decodeQueueSize > 3) return;
+
     try {
       const avcc = annexbToAvcc(data);
       decoder.decode(new EncodedVideoChunk({
