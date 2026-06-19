@@ -1,0 +1,5 @@
+{
+  "interactivity": {
+    "customInstructions": "ALWAYS format your code outputs and file edits properly before finishing.NEVER emit trailing whitespaces or messy indentations.If the project contains a linter/formatter config (e.g., .prettierrc, pyproject.toml), you MUST run the corresponding format command (e.g., `npm run format` or `ruff format`) immediately after editing files, without asking for permission."
+  }
+}
