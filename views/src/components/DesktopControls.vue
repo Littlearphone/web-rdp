@@ -1,86 +1,85 @@
 <template>
   <div id="bar">
-    <!-- 屏幕选择 -->
-    <span class="label">屏幕</span>
+    <!-- ═══ 固定布局：屏幕 / 画质 / 分辨率 ═══ -->
     <n-select
       v-model:value="store.currentScreen"
       :options="screenOptions"
       size="tiny"
-      style="width:100px"
+      style="width:80px"
       @update:value="onScreenChange"
     />
 
     <span class="sep">|</span>
 
-    <!-- 画质滑块 -->
     <span class="label">画质</span>
     <n-slider
       v-model:value="store.currentQ"
       :min="30"
       :max="100"
       :step="5"
-      style="width:70px"
+      style="width:60px"
       @update:value="store.sendSettings"
     />
-    <span class="label">{{ store.currentQ }}</span>
 
     <span class="sep">|</span>
 
-    <!-- 帧率选择（仅 H.264 ddagrab 模式） -->
-    <template v-if="store.streamFormat === 'h264' && store.statsMaxRate > 0">
-      <span class="label">帧率</span>
-      <n-select
-        v-model:value="store.currentFPS"
-        :options="fpsOptions"
-        size="tiny"
-        style="width:130px"
-        @update:value="onFPSChange"
-      />
-      <span class="sep">|</span>
-    </template>
-
-    <!-- 分辨率选择 -->
     <span class="label">分辨率</span>
     <n-select
       v-model:value="store.currentMW"
       :options="resOptions"
       size="tiny"
-      style="width:130px"
+      style="width:90px"
       @update:value="store.sendSettings"
     />
 
     <span class="sep">|</span>
 
-    <!-- 控制开关 -->
+    <!-- ═══ 动态区域：控制 / 低流量 / 帧率 / 统计数据 ═══ -->
     <n-switch
       v-model:value="controlOn"
       :disabled="controlDisabled"
       size="small"
       @update:value="onControlToggle"
     />
-    <span
-      class="label"
-      :title="controlTitle"
-      style="cursor:pointer"
-    >控制</span>
+    <n-tooltip trigger="hover">
+      <template #trigger>
+        <span class="label">{{ controlTip }}</span>
+      </template>
+      {{ controlTitle }}
+    </n-tooltip>
 
     <span class="sep">|</span>
 
-    <!-- H.264 开关 -->
     <n-switch
       v-model:value="store.useH264"
       :disabled="!store.canH264"
       size="small"
       @update:value="onH264Toggle"
     />
-    <span class="label" title="勾选=H.264低流量模式，取消=MJPEG兼容模式">H.264 编码</span>
+    <n-tooltip trigger="hover">
+      <template #trigger>
+        <span class="label">节流模式</span>
+      </template>
+      开启：GPU 硬件编码，流量低延迟小<br>关闭：兼容模式，纯软件编码
+    </n-tooltip>
 
     <span class="sep">|</span>
 
-    <!-- 统计信息 -->
-    <span id="stats">{{ statsText }}</span>
+    <!-- 帧率选项（仅 H.264/ddagrab 模式可见） -->
+    <template v-if="store.streamFormat === 'h264' && store.statsMaxRate > 0">
+      <n-select
+        v-model:value="store.currentFPS"
+        :options="fpsOptions"
+        size="tiny"
+        style="width:100px"
+        @update:value="onFPSChange"
+      />
+    </template>
 
-    <!-- 状态文本（可点击重连） -->
+    <!-- 动态数据 -->
+    <span class="stat">{{ store.statsFps }}fps │ {{ store.statsEncMs }}ms │ {{ (store.statsKb * store.statsFps / 1024).toFixed(1) }}MB/s</span>
+
+    <!-- 连接状态 -->
     <span style="margin-left:auto">
       <span
         class="status-text"
@@ -93,7 +92,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
-import { NSelect, NSlider, NSwitch } from 'naive-ui';
+import { NSelect, NSlider, NSwitch, NTooltip } from 'naive-ui';
 import { useAppStore } from '@/stores/app';
 import { buildResolutions, buildFPSOptions } from '@/composables/useResolutionOptions';
 import { useWebSocket } from '@/composables/useWebSocket';
@@ -101,12 +100,11 @@ import { useWebSocket } from '@/composables/useWebSocket';
 const store = useAppStore();
 const { connect } = useWebSocket();
 
-// ── 屏幕选项 ──
 const screenOptions = computed(() => {
   const opts = [];
   for (let i = 0; i < store.screenCount; i++) {
     opts.push({
-      label: i === 0 ? `主屏 (0)` : `副屏 (${i})`,
+      label: i === 0 ? '主屏' : `副屏${i}`,
       value: i,
     });
   }
@@ -120,17 +118,11 @@ function onScreenChange(v: number) {
   store.send({ screen: v, maxw: 0 });
 }
 
-// ── 分辨率选项 ──
 const resOptions = computed(() => {
-  const opts = buildResolutions(
-    store.basePw,
-    store.basePh,
-    false,
-  );
+  const opts = buildResolutions(store.basePw, store.basePh, false);
   return opts.map(o => ({ label: o.label, value: o.value ?? o.w }));
 });
 
-// ── FPS 选项 ──
 const fpsOptions = computed(() => buildFPSOptions(store.statsMaxRate));
 
 function onFPSChange(v: number) {
@@ -146,13 +138,17 @@ const controlDisabled = computed(() => {
 });
 const controlTitle = computed(() => {
   return store.statsOwner
-    ? `控制权: ${store.statsOwner}`
-    : '点击获取控制权';
+    ? `${store.statsOwner} 正在控制`
+    : '打开开关获取控制权';
+});
+const controlTip = computed(() => {
+  return store.statsOwner
+    ? `${store.statsOwner} 正在控制`
+    : '控制';
 });
 
 watch(() => store.statsOwner, (owner) => {
-  const me = store.statsUser;
-  controlOn.value = owner === me;
+  controlOn.value = owner === store.statsUser;
 });
 
 function onControlToggle(v: boolean) {
@@ -160,18 +156,11 @@ function onControlToggle(v: boolean) {
   store.send({ control: v });
 }
 
-// ── H.264 切换 ──
 function onH264Toggle(v: boolean) {
   store.useH264 = v;
   store.sendSettings();
 }
 
-// ── 统计文本 ──
-const statsText = computed(() => {
-  return `${store.statsW}×${store.statsH} Q${store.statsQ} │ ${store.statsFps}fps │ ${store.statsEncMs}ms │ ${store.statsKb}KB/f │ ${(store.statsKb * store.statsFps / 1024).toFixed(1)}MB/s`;
-});
-
-// ── 状态文本 ──
 const statusText = computed(() => {
   switch (store.connectionStatus) {
     case 'connecting': return '连接中...';
@@ -206,7 +195,7 @@ function onStatusClick() {
   padding: 4px 10px;
   border-bottom: 1px solid #333;
   font-size: 12px;
-  gap: 8px;
+  gap: 6px;
   user-select: none;
   min-height: 36px;
   flex-shrink: 0;
@@ -221,10 +210,10 @@ function onStatusClick() {
   color: #444;
 }
 
-#stats {
+.stat {
   font-size: 12px;
   color: #4ec9b0;
-  text-align: right;
+  white-space: nowrap;
 }
 
 .status-text {
