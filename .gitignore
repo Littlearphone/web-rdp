@@ -9,6 +9,7 @@ static/
 *.iml
 
 # Go 构建产物
+*.pem
 *.exe
 web-rdp
 /ffmpeg_local/

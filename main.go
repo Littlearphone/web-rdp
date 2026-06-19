@@ -217,6 +217,96 @@ type statsMsg struct {
 
 // main 是程序入口，负责解析命令行参数、初始化组件并启动 HTTP 服务器。
 // 主要流程：解析参数 → 设置 DPI → 初始化 HTTP 客户端 → 检测 ffmpeg → 检测编码器 → 启动服务
+// ── 证书持久化 ──
+
+// loadCertFromDisk 从磁盘加载 PEM 证书和私钥。
+// 如果任一文件不存在、解析失败或证书距过期 ≤30 天，返回 false。
+func loadCertFromDisk(certFile, keyFile string) (tls.Certificate, bool) {
+	certPEM, err := os.ReadFile(certFile)
+	if err != nil {
+		return tls.Certificate{}, false
+	}
+	keyPEM, err := os.ReadFile(keyFile)
+	if err != nil {
+		return tls.Certificate{}, false
+	}
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		log.Printf("⚠ 证书解析失败: %v，重新生成", err)
+		return tls.Certificate{}, false
+	}
+	// 解析证书检查过期时间
+	x509Cert, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return tls.Certificate{}, false
+	}
+	if time.Until(x509Cert.NotAfter) <= 30*24*time.Hour {
+		fmt.Printf("→ 证书即将过期 (%s)，重新生成\n", x509Cert.NotAfter.Format("2006-01-02"))
+		return tls.Certificate{}, false
+	}
+	fmt.Printf("→ 使用已有证书 (过期: %s)\n", x509Cert.NotAfter.Format("2006-01-02"))
+	return cert, true
+}
+
+// generateSelfSignedCert 生成自签名 ECDSA P-256 证书，返回 cert 和 PEM 编码数据。
+// 证书有效期 365 天，SAN 包含主机名和本机非回环 IPv4 地址。
+func generateSelfSignedCert() (tls.Certificate, []byte, []byte) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		log.Fatalf("生成 ECDSA 密钥失败: %v", err)
+	}
+
+	notBefore := time.Now()
+	notAfter := notBefore.Add(365 * 24 * time.Hour)
+
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		log.Fatalf("生成证书序列号失败: %v", err)
+	}
+
+	hostname, _ := os.Hostname()
+
+	var ips []net.IP
+	addrs, _ := net.InterfaceAddrs()
+	for _, a := range addrs {
+		if ipNet, ok := a.(*net.IPNet); ok && ipNet.IP.To4() != nil && !ipNet.IP.IsLoopback() {
+			ips = append(ips, ipNet.IP)
+		}
+	}
+
+	dnsNames := []string{hostname, "localhost"}
+	ips = append(ips, net.ParseIP("127.0.0.1"))
+
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: hostname, Organization: []string{"web-rdp"}},
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     dnsNames,
+		IPAddresses:  ips,
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		log.Fatalf("生成自签名证书失败: %v", err)
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyBytes, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		log.Fatalf("序列化私钥失败: %v", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
+
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		log.Fatalf("加载证书失败: %v", err)
+	}
+	return cert, certPEM, keyPEM
+}
+
 func main() {
 	var (
 		proxy     string // HTTP 代理地址
@@ -238,65 +328,21 @@ func main() {
 	}
 	flag.Parse()
 
-	// generateSelfSignedCert 生成一个自签名 ECDSA P-256 证书，SAN 包含主机名和本机 IP。
-	// 证书仅在内存中，每次启动重新生成，有效期为 365 天。
-	// 用于局域网 HTTPS 场景，使浏览器将页面视为 Secure Context，从而暴露 VideoDecoder API。
-	generateSelfSignedCert := func() tls.Certificate {
-		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-		if err != nil {
-			log.Fatalf("生成 ECDSA 密钥失败: %v", err)
+	// ── 证书加载 / 生成 ──
+	const certFile = "cert.pem"
+	const keyFile = "key.pem"
+
+	cert, ok := loadCertFromDisk(certFile, keyFile)
+	if !ok {
+		var certPEM, keyPEM []byte
+		cert, certPEM, keyPEM = generateSelfSignedCert()
+		if err := os.WriteFile(certFile, certPEM, 0600); err != nil {
+			log.Printf("⚠ 无法保存证书: %v", err)
 		}
-
-		notBefore := time.Now()
-		notAfter := notBefore.Add(365 * 24 * time.Hour)
-
-		serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-		if err != nil {
-			log.Fatalf("生成证书序列号失败: %v", err)
+		if err := os.WriteFile(keyFile, keyPEM, 0600); err != nil {
+			log.Printf("⚠ 无法保存私钥: %v", err)
 		}
-
-		hostname, _ := os.Hostname()
-
-		// 收集本机非回环 IPv4 地址作为 SAN
-		var ips []net.IP
-		addrs, _ := net.InterfaceAddrs()
-		for _, a := range addrs {
-			if ipNet, ok := a.(*net.IPNet); ok && ipNet.IP.To4() != nil && !ipNet.IP.IsLoopback() {
-				ips = append(ips, ipNet.IP)
-			}
-		}
-
-		dnsNames := []string{hostname, "localhost"}
-		ips = append(ips, net.ParseIP("127.0.0.1"))
-
-		tmpl := &x509.Certificate{
-			SerialNumber: serial,
-			Subject:      pkix.Name{CommonName: hostname, Organization: []string{"web-rdp"}},
-			NotBefore:    notBefore,
-			NotAfter:     notAfter,
-			KeyUsage:     x509.KeyUsageDigitalSignature,
-			ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-			DNSNames:     dnsNames,
-			IPAddresses:  ips,
-		}
-
-		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-		if err != nil {
-			log.Fatalf("生成自签名证书失败: %v", err)
-		}
-
-		certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-		keyBytes, err := x509.MarshalECPrivateKey(key)
-		if err != nil {
-			log.Fatalf("序列化私钥失败: %v", err)
-		}
-		keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
-
-		cert, err := tls.X509KeyPair(certPEM, keyPEM)
-		if err != nil {
-			log.Fatalf("加载证书失败: %v", err)
-		}
-		return cert
+		fmt.Printf("→ 自签名证书已保存 (%s / %s)\n", certFile, keyFile)
 	}
 
 	if ffmpegArg != "" {
@@ -357,7 +403,6 @@ func main() {
 
 	addr := fmt.Sprintf("%s:%d", listen, port)
 	if useTLS {
-		cert := generateSelfSignedCert()
 		tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}}
 		ln, err := net.Listen("tcp", addr)
 		if err != nil {
