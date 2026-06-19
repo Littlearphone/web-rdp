@@ -82,23 +82,52 @@ func (f *ffSession) stop() {
 // acquireFFmpeg 获取或创建指定显示器的 ffmpeg 会话。
 // 如果参数匹配现有会话则复用（引用计数+1），否则停止旧会话并创建新会话。
 // h264 决定编码格式，fps 为手动帧率（0=自动检测，仅 ddagrab 模式生效）。
+// 多用户场景下，已有会话无条件复用（参数以首个创建者为准），
+// 仅控制者可调用 restartFFmpeg 强制重建。
 func acquireFFmpeg(id, quality, maxW, fps int, h264 bool) *ffSession {
 	ffPoolMu.Lock()
 	defer ffPoolMu.Unlock()
-	s, ok := ffPool[id]
-	if ok && ffPoolQ[id] == quality && ffPoolMW[id] == maxW && ffPoolFPS[id] == fps && ffPoolH264[id] == h264 {
+	if s, ok := ffPool[id]; ok {
 		ffRefs[id]++
 		return s
 	}
-	if ok {
-		s.stop()
-		delete(ffPool, id)
-		delete(ffRefs, id)
-	}
-	s = startFFmpeg(id, quality, maxW, fps, h264)
+	s := startFFmpeg(id, quality, maxW, fps, h264)
 	if s != nil {
 		ffPool[id] = s
 		ffRefs[id] = 1
+		ffPoolQ[id] = quality
+		ffPoolMW[id] = maxW
+		ffPoolFPS[id] = fps
+		ffPoolH264[id] = h264
+	}
+	return s
+}
+
+// restartFFmpeg 强制停止旧会话并创建新会话（仅控制者调用）。
+// 会关闭所有订阅者的通道，订阅者收到 nil 后重新 join 新会话。
+//
+// 重要：调用者必须在调用前已通过 releaseFFmpeg 释放自己对旧会话的引用，
+// 因此 ffRefs[id] 仅反映其他订阅者的引用。必须保留这些引用并迁移到新会话，
+// 否则其他订阅者在收到 nil 后调用 releaseFFmpeg 会将新会话的引用计数减到 0，
+// 导致新会话被意外杀死（详见 ffmpeg_pipeline.go 顶部关于并发查看花屏的修复）。
+func restartFFmpeg(id, quality, maxW, fps int, h264 bool) *ffSession {
+	ffPoolMu.Lock()
+	defer ffPoolMu.Unlock()
+
+	// 保存其他订阅者的引用计数（调用者已释放自己的引用）
+	remainingRefs := 0
+	if s, ok := ffPool[id]; ok {
+		s.stop()
+		remainingRefs = ffRefs[id]
+		delete(ffPool, id)
+		delete(ffRefs, id)
+	}
+
+	s := startFFmpeg(id, quality, maxW, fps, h264)
+	if s != nil {
+		ffPool[id] = s
+		// 新会话的引用 = 其他订阅者 + 当前调用者（本次 subscribe 对应）
+		ffRefs[id] = remainingRefs + 1
 		ffPoolQ[id] = quality
 		ffPoolMW[id] = maxW
 		ffPoolFPS[id] = fps

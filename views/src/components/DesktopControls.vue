@@ -1,6 +1,6 @@
 <template>
   <div id="bar">
-    <!-- ═══ 固定布局：屏幕 / 画质 / 分辨率 ═══ -->
+    <!-- 屏幕选择：始终可见 -->
     <n-select
       v-model:value="store.currentScreen"
       :options="screenOptions"
@@ -9,32 +9,9 @@
       @update:value="onScreenChange"
     />
 
+    <!-- 控制权开关：始终可见，紧跟屏幕选项 -->
     <span class="sep">|</span>
 
-    <span class="label">画质</span>
-    <n-slider
-      v-model:value="store.currentQ"
-      :min="30"
-      :max="100"
-      :step="5"
-      style="width:60px"
-      @update:value="store.sendSettings"
-    />
-
-    <span class="sep">|</span>
-
-    <span class="label">分辨率</span>
-    <n-select
-      v-model:value="store.currentMW"
-      :options="resOptions"
-      size="tiny"
-      style="width:90px"
-      @update:value="store.sendSettings"
-    />
-
-    <span class="sep">|</span>
-
-    <!-- ═══ 动态区域：控制 / 低流量 / 帧率 / 统计数据 ═══ -->
     <n-switch
       v-model:value="controlOn"
       :disabled="controlDisabled"
@@ -48,37 +25,63 @@
       {{ controlTitle }}
     </n-tooltip>
 
-    <template v-if="store.canH264">
+    <!-- 画质 / 分辨率 / 编码 / 帧率：仅控制者可见 -->
+    <template v-if="isController">
       <span class="sep">|</span>
 
-      <n-switch
-        v-model:value="store.useH264"
-        size="small"
-        @update:value="onH264Toggle"
+      <span class="label">画质</span>
+      <n-slider
+        v-model:value="store.currentQ"
+        :min="30"
+        :max="100"
+        :step="5"
+        style="width:60px"
+        @update:value="store.sendSettings"
       />
-      <n-tooltip trigger="hover">
-        <template #trigger>
-          <span class="label">节流模式</span>
-        </template>
-        开启：GPU 硬件编码，流量低延迟小<br>关闭：兼容模式，纯软件编码
-      </n-tooltip>
-    </template>
 
-    <span class="sep">|</span>
+      <span class="sep">|</span>
 
-    <!-- 帧率选项（仅 H.264/ddagrab 模式可见） -->
-    <template v-if="store.streamFormat === 'h264' && store.statsMaxRate > 0">
+      <span class="label">分辨率</span>
       <n-select
-        v-model:value="store.currentFPS"
-        :options="fpsOptions"
+        v-model:value="store.currentMW"
+        :options="resOptions"
         size="tiny"
-        style="width:100px"
-        @update:value="onFPSChange"
+        style="width:90px"
+        @update:value="store.sendSettings"
       />
+
+      <template v-if="store.canH264">
+        <span class="sep">|</span>
+
+        <n-switch
+          v-model:value="store.useH264"
+          size="small"
+          @update:value="onH264Toggle"
+        />
+        <n-tooltip trigger="hover">
+          <template #trigger>
+            <span class="label">节流模式</span>
+          </template>
+          开启：GPU 硬件编码，流量低延迟小<br>关闭：兼容模式，纯软件编码
+        </n-tooltip>
+      </template>
+
+      <template v-if="store.streamFormat === 'h264' && store.statsMaxRate > 0">
+        <span class="sep">|</span>
+
+        <n-select
+          v-model:value="store.currentFPS"
+          :options="fpsOptions"
+          size="tiny"
+          style="width:100px"
+          @update:value="onFPSChange"
+        />
+      </template>
     </template>
 
     <!-- 动态数据 -->
-    <span class="stat">{{ store.statsFps }}fps │ {{ store.statsEncMs }}ms │ {{ (store.statsKb * store.statsFps / 1024).toFixed(1) }}MB/s</span>
+    <span class="sep">|</span>
+    <span class="stat">{{ store.statsFps }}fps | {{ store.statsEncMs }}ms | {{ (store.statsKb * store.statsFps / 1024).toFixed(1) }}MB/s</span>
 
     <!-- 连接状态 -->
     <span style="margin-left:auto">
@@ -101,6 +104,9 @@ import { useWebSocket } from '@/composables/useWebSocket';
 const store = useAppStore();
 const { connect } = useWebSocket();
 const notification = useNotification();
+
+/** 当前用户是否为控制者（仅控制者可见流配置项） */
+const isController = computed(() => store.statsOwner === store.statsUser);
 
 const screenOptions = computed(() => {
   const opts = [];

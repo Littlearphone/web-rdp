@@ -226,18 +226,25 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 		if useFFmpeg {
 			// ── ffmpeg 路径 ──
 			h264 := useH264.Load()
-			if ff == nil || ffScreen != id || ffQ != q || ffMW != mw || ffFPS != fps || ffH264 != h264 {
+			paramsChanged := ffQ != q || ffMW != mw || ffFPS != fps || ffH264 != h264
+			isCtrl := hasControl(userName)
+
+			// 仅控制者可因参数变化重启 ffmpeg；非控制者静默接受现有参数
+			if ff == nil || ffScreen != id || (paramsChanged && isCtrl) {
 				if ff != nil {
 					ff.unsubscribe(subID)
 					releaseFFmpeg(curScreen)
 				}
-				ff = acquireFFmpeg(id, q, mw, fps, h264)
+				if paramsChanged && isCtrl {
+					ff = restartFFmpeg(id, q, mw, fps, h264)
+				} else {
+					ff = acquireFFmpeg(id, q, mw, fps, h264)
+				}
 				if ff == nil {
 					log.Printf("ffmpeg 启动失败")
 					if h264 && tryNextH264Encoder() {
 						continue // 回退到下一个编码器重试
 					}
-					// 所有 H.264 编码器已耗尽，回退到 MJPEG
 					if h264 {
 						useH264.Store(false)
 						log.Printf("所有 H.264 编码器已耗尽，回退到 MJPEG")
@@ -247,19 +254,35 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 					continue
 				}
 				subID, subCh = ff.subscribe()
+
+				// 对齐追踪变量到池中实际参数（加入已有会话时可能与用户默认值不同）
+				ffPoolMu.Lock()
+				if _, ok := ffPool[id]; ok {
+					ffQ = ffPoolQ[id]
+					ffMW = ffPoolMW[id]
+					ffFPS = ffPoolFPS[id]
+					ffH264 = ffPoolH264[id]
+					currentQuality.Store(int32(ffQ))
+					currentMaxW.Store(int32(ffMW))
+					currentFPS.Store(int32(ffFPS))
+					useH264.Store(ffH264)
+					// 同步局部变量，确保本迭代内格式消息携带正确值
+					q, mw, fps = ffQ, ffMW, ffFPS
+					h264 = ffH264
+				}
+				ffPoolMu.Unlock()
+
 				ffScreen = id
 				curScreen = id
-				ffQ = q
-				ffMW = mw
-				ffFPS = fps
-				ffH264 = h264
 				cacheFrame = 0
 				f := "jpeg"
 				if ffH264 {
 					f = "h264"
 				}
 				log.Printf("编码格式切换 → %s", f)
-				if b, _ := json.Marshal(map[string]string{"format": f}); b != nil {
+				if b, _ := json.Marshal(map[string]interface{}{
+					"format": f, "quality": ffQ, "maxw": ffMW, "fps": ffFPS,
+				}); b != nil {
 					outCh <- wsMessage{websocket.TextMessage, b}
 				}
 			}
@@ -269,14 +292,13 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			case data = <-subCh:
 				if data == nil {
 					ff.unsubscribe(subID)
-					releaseFFmpeg(curScreen) // 清理池中已死的 session，避免 acquireFFmpeg 复用
+					releaseFFmpeg(curScreen)
 					ff = nil
 					ffScreen = -1
 					curScreen = -1
 					if ffH264 && tryNextH264Encoder() {
-						continue // ffmpeg异常退出，即时回退
+						continue
 					}
-					// 所有 H.264 编码器已耗尽，回退到 MJPEG
 					if ffH264 {
 						useH264.Store(false)
 						log.Printf("所有 H.264 编码器已耗尽，回退到 MJPEG")
@@ -293,9 +315,8 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				ffScreen = -1
 				curScreen = -1
 				if ffH264 && tryNextH264Encoder() {
-					continue // GPU编码器运行时失败，回退
+					continue
 				}
-				// 所有 H.264 编码器已耗尽，回退到 MJPEG
 				if ffH264 {
 					useH264.Store(false)
 					log.Printf("所有 H.264 编码器已耗尽，回退到 MJPEG")
@@ -320,13 +341,12 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			}
 			cacheFrame--
 
-			// MJPEG 需要 24B 头，H.264 裸发
 			if !ffH264 {
 				data = encodeFrame(int32(cachedBounds.Min.X), int32(cachedBounds.Min.Y),
 					int32(cachedBounds.Dx()), int32(cachedBounds.Dy()), cachedZoom, data)
 			}
 			if ffH264 {
-				outCh <- wsMessage{websocket.BinaryMessage, data} // H.264 阻塞：参考帧不丢
+				outCh <- wsMessage{websocket.BinaryMessage, data}
 			} else {
 				select {
 				case outCh <- wsMessage{websocket.BinaryMessage, data}:
@@ -344,7 +364,6 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 					if r := getDisplayRefreshRate(id); r > 0 {
 						maxRate = r
 					}
-					// 分辨率上限（与自动模式一致），选项里不写超出编码能力的值
 					if px := cachedBounds.Dx() * cachedBounds.Dy(); px > 0 {
 						if c := 700_000_000 / px; maxRate > c {
 							maxRate = c
@@ -365,8 +384,6 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 					select {
 					case outCh <- wsMessage{websocket.TextMessage, b}:
 					default:
-						{
-						}
 					}
 				}
 				frames, totalWait, maxWait, lastStats = 0, 0, 0, time.Now()

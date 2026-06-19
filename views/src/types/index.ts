@@ -54,10 +54,13 @@ export interface StatsMsg {
   maxrate: number;
 }
 
-/** 初始化消息（用户名 + 编码格式） */
+/** 初始化 / 格式切换消息（用户名 + 编码格式 + 会话实际参数） */
 export interface InitMsg {
   user?: string;
   format?: string;
+  quality?: number;
+  maxw?: number;
+  fps?: number;
 }
 
 /** 控制权限状态 */

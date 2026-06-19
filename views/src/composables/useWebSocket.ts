@@ -60,7 +60,11 @@ export function useWebSocket() {
             store.streamFormat = wanted;
             store.connectionStatus = 'switching';
           }
-          return; // 格式消息不含 stats
+          // 后端下发实际会话参数，同步 UI（加入已有会话时可能不同于本地默认值）
+          if (s.quality !== undefined) store.currentQ = s.quality;
+          if (s.maxw !== undefined) store.currentMW = s.maxw;
+          if (s.fps !== undefined) store.currentFPS = s.fps;
+          return;
         }
 
         // 性能统计（每秒推送）
