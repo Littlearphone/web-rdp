@@ -211,7 +211,7 @@ func main() {
 
 	if ffmpegArg != "" {
 		ffmpegPath = ffmpegArg
-		hasDXGI = checkDXGI(ffmpegArg)
+		hasDDAGrab = checkDDAGrab(ffmpegArg)
 		useFFmpeg = true
 		fmt.Printf("使用指定 ffmpeg: %s\n", ffmpegArg)
 	}

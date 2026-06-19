@@ -93,14 +93,16 @@ func startFFmpeg(id, quality, maxW int, h264 bool) *ffSession {
 	physW, physH := bounds.Dx(), bounds.Dy()
 
 	var capX, capY, capW, capH int
-	var device string
-	if hasDXGI {
-		device = "dxgigrab"
-		capX, capY = bounds.Min.X, bounds.Min.Y
+	var useDDAGrab bool
+	if hasDDAGrab {
+		// ddagrab 滤镜：通过 DXGI Desktop Duplication API 捕获，零 GDI 开销
+		// 坐标是显示器相对坐标（output_idx 选定目标显示器）
+		useDDAGrab = true
+		capX, capY = 0, 0
 		capW, capH = physW, physH
 	} else {
+		// gdigrab 回退：传统 GDI 捕获，坐标是虚拟桌面绝对坐标，需乘 DPI 缩放
 		z := getScreenZoom(0)
-		device = "gdigrab"
 		capX = int(float64(bounds.Min.X) * z)
 		capY = int(float64(bounds.Min.Y) * z)
 		capW = int(float64(physW) * z)
@@ -129,16 +131,19 @@ func startFFmpeg(id, quality, maxW int, h264 bool) *ffSession {
 		}
 		vf = fmt.Sprintf("scale=%d:%d:flags=fast_bilinear,format=yuv420p", outW, outH)
 	}
+	if useDDAGrab {
+		// ddagrab 输出 D3D11 硬件纹理，需先 hwdownload 到系统内存再处理
+		vf = "hwdownload,format=bgra," + vf
+	}
 
 	var args []string
 	if h264 {
-		args = h264Args(device, capX, capY, capW, capH, vf)
-		// h264Args 返回 nil 表示编码器列表已耗尽，应回退到 MJPEG
+		args = h264Args(useDDAGrab, id, capX, capY, capW, capH, vf, quality)
 		if args == nil {
 			return nil
 		}
 	} else {
-		args = mjpegArgs(device, capX, capY, capW, capH, vf, ffQ)
+		args = mjpegArgs(useDDAGrab, id, capX, capY, capW, capH, vf, ffQ)
 	}
 
 	cmd := exec.Command(ffmpegPath, args...)
@@ -150,7 +155,11 @@ func startFFmpeg(id, quality, maxW int, h264 bool) *ffSession {
 		log.Printf("ffmpeg 失败: %v", err)
 		return nil
 	}
-	log.Printf("ffmpeg: %s %dx%d out=%dx%d", device, physW, physH, outW, outH)
+	devName := "gdigrab"
+	if useDDAGrab {
+		devName = "ddagrab"
+	}
+	log.Printf("ffmpeg: %s %dx%d out=%dx%d", devName, physW, physH, outW, outH)
 
 	ff := &ffSession{
 		cmd:     cmd,
@@ -171,41 +180,67 @@ func startFFmpeg(id, quality, maxW int, h264 bool) *ffSession {
 
 // 根据检测到的 H.264 编码器构建 ffmpeg 参数。
 // GPU 编码器优先（低延迟、低 CPU 占用），libx264 作为最终回退。
+// quality 为用户画质滑块值（10-100），映射到各编码器的质量/码率参数。
 // 当编码器列表耗尽时返回 nil，由调用方回退到 MJPEG。
-func h264Args(device string, cx, cy, cw, ch int, vf string) []string {
+func h264Args(useDDAGrab bool, id, cx, cy, cw, ch int, vf string, quality int) []string {
 	base := []string{
 		"-hide_banner", "-loglevel", "error",
 		"-sws_flags", "fast_bilinear",
-		"-f", device, "-framerate", "60",
-		"-draw_mouse", "1",
-		"-offset_x", strconv.Itoa(cx),
-		"-offset_y", strconv.Itoa(cy),
-		"-video_size", fmt.Sprintf("%dx%d", cw, ch),
-		"-i", "desktop",
-		"-vf", vf,
 	}
+	if useDDAGrab {
+		// ddagrab 是 video source filter，通过 lavfi 设备加载
+		base = append(base,
+			"-f", "lavfi",
+			"-i", fmt.Sprintf("ddagrab=output_idx=%d:framerate=60:draw_mouse=1", id),
+		)
+	} else {
+		base = append(base,
+			"-f", "gdigrab", "-framerate", "60",
+			"-draw_mouse", "1",
+			"-offset_x", strconv.Itoa(cx),
+			"-offset_y", strconv.Itoa(cy),
+			"-video_size", fmt.Sprintf("%dx%d", cw, ch),
+			"-i", "desktop",
+		)
+	}
+	base = append(base, "-vf", vf)
+
+	// 画质映射：滑块 30-100 → 编码器质量参数（0-51，值越小画质越高）
+	//   滑块 100 → 12（极致画质）
+	//   滑块  75 → 28（默认，与旧版硬编码值一致）
+	//   滑块  30 → 48（最低画质，节省流量）
+	var hq int
+	if quality >= 75 {
+		hq = 28 - (quality-75)*16/25
+	} else {
+		hq = 28 + (75-quality)*20/45
+	}
+	if hq < 1 {
+		hq = 1
+	}
+	if hq > 51 {
+		hq = 51
+	}
+	hqs := strconv.Itoa(hq)
+
 	enc := currentH264Encoder()
 	switch enc {
 	case "h264_nvenc":
 		// NVIDIA GPU：p1=最快速度, ll=低延迟, vbr+cq=可变码率恒定质量
 		base = append(base, "-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ll",
-			"-rc", "vbr", "-cq", "28", "-g", "120")
+			"-rc", "vbr", "-cq", hqs, "-g", "120")
 	case "h264_amf":
 		// AMD GPU：speed=最快速度, cqp=恒定质量
 		base = append(base, "-c:v", "h264_amf", "-quality", "speed",
-			"-rc", "cqp", "-qp_p", "28", "-qp_i", "28", "-g", "120")
+			"-rc", "cqp", "-qp_p", hqs, "-qp_i", hqs, "-g", "120")
 	case "h264_qsv":
 		// Intel Quick Sync：look_ahead=0 关闭前瞻减少延迟
 		base = append(base, "-c:v", "h264_qsv", "-preset", "veryfast", "-look_ahead", "0",
-			"-g", "120", "-global_quality", "28")
-	case "h264_mf":
-		// Windows Media Foundation：系统自带（quality=画质优先）
-		base = append(base, "-c:v", "h264_mf", "-preset", "quality",
-			"-rc", "vbr", "-qp", "28", "-g", "120")
+			"-g", "120", "-global_quality", hqs)
 	case "libx264":
 		// CPU 软件编码回退：ultrafast + zerolatency + 单 slice
 		base = append(base, "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-			"-crf", "28", "-g", "120", "-x264opts", "slices=1:threads=1")
+			"-crf", hqs, "-g", "120", "-x264opts", "slices=1:threads=1")
 	default:
 		// 编码器列表已耗尽（currentH264Encoder() 返回 ""），无可用的 H.264 编码器
 		return nil
@@ -284,21 +319,33 @@ func h264Reader(ff *ffSession) {
 
 // mjpegArgs 构建 MJPEG 编码的 ffmpeg 命令行参数。
 // 使用 image2pipe 容器直接输出 JPEG 数据流，前端通过 SOI/EOI 标记分割帧。
-func mjpegArgs(device string, cx, cy, cw, ch int, vf string, ffQ int) []string {
-	return []string{
+func mjpegArgs(useDDAGrab bool, id, cx, cy, cw, ch int, vf string, ffQ int) []string {
+	args := []string{
 		"-hide_banner", "-loglevel", "error",
 		"-sws_flags", "fast_bilinear",
-		"-f", device, "-framerate", "60",
-		"-draw_mouse", "1",
-		"-offset_x", strconv.Itoa(cx),
-		"-offset_y", strconv.Itoa(cy),
-		"-video_size", fmt.Sprintf("%dx%d", cw, ch),
-		"-i", "desktop",
+	}
+	if useDDAGrab {
+		args = append(args,
+			"-f", "lavfi",
+			"-i", fmt.Sprintf("ddagrab=output_idx=%d:framerate=60:draw_mouse=1", id),
+		)
+	} else {
+		args = append(args,
+			"-f", "gdigrab", "-framerate", "60",
+			"-draw_mouse", "1",
+			"-offset_x", strconv.Itoa(cx),
+			"-offset_y", strconv.Itoa(cy),
+			"-video_size", fmt.Sprintf("%dx%d", cw, ch),
+			"-i", "desktop",
+		)
+	}
+	args = append(args,
 		"-vf", vf,
 		"-c:v", "mjpeg", "-q:v", strconv.Itoa(ffQ),
 		"-huffman", "default",
 		"-f", "image2pipe", "pipe:1",
-	}
+	)
+	return args
 }
 
 // mjpegReader 持续从 ffmpeg stdout 读取 MJPEG 数据流，

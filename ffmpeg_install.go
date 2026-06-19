@@ -19,7 +19,7 @@ const ffmpegReleaseAPI = "https://api.github.com/repos/BtbN/FFmpeg-Builds/releas
 
 var (
 	ffmpegPath   string
-	hasDXGI      bool
+	hasDDAGrab   bool
 	useFFmpeg    bool
 	h264Encoders []string // 可用编码器列表（GPU优先，CPU回退）
 	h264EncIdx   int      // 当前使用的编码器索引
@@ -45,26 +45,24 @@ func tryNextH264Encoder() bool {
 
 // detectFFmpeg 自动检测系统中的 ffmpeg 可执行文件。
 // 优先级：本地目录 ffmpeg_local/ → PATH 环境变量 → 在线下载
-// 下载时优先选择支持 dxgigrab（DirectX 桌面捕获）的版本。
+// 下载的 BtbN 构建（FFmpeg ≥6.0）自带 ddagrab 滤镜（DXGI Desktop Duplication）。
 func detectFFmpeg() {
 	local := filepath.Join(ffmpegLocalDir, "bin", "ffmpeg.exe")
 
 	// 1) 检查本地 ffmpeg_local/ 目录
 	if _, err := os.Stat(local); err == nil {
 		ffmpegPath = local
-		hasDXGI = checkDXGI(local)
+		hasDDAGrab = checkDDAGrab(local)
 		useFFmpeg = true
-		if !hasDXGI {
-			if askYN("本地 ffmpeg 不支持 dxgigrab（DirectX 捕获），下载 DX 优化版？") {
+		if !hasDDAGrab {
+			if askYN("本地 ffmpeg 不支持 ddagrab（DXGI 桌面捕获），下载新版本？") {
 				downloadAndExtract()
 				if _, err := os.Stat(local); err == nil {
 					ffmpegPath = local
-					hasDXGI = checkDXGI(local)
+					hasDDAGrab = checkDDAGrab(local)
 				}
-				// 下载成功则用新版；失败则沿用旧版
 			}
-			// 用户拒绝下载 → 继续使用本地 ffmpeg（gdigrab 回退）
-			if !hasDXGI {
+			if !hasDDAGrab {
 				log.Printf("→ 使用本地 ffmpeg（gdigrab 模式）")
 			}
 		}
@@ -74,18 +72,17 @@ func detectFFmpeg() {
 	// 2) 检查 PATH 中的 ffmpeg
 	if p, err := exec.LookPath("ffmpeg"); err == nil {
 		ffmpegPath = p
-		hasDXGI = checkDXGI(p)
+		hasDDAGrab = checkDDAGrab(p)
 		useFFmpeg = true
-		if !hasDXGI {
-			if askYN("系统 ffmpeg 不支持 dxgigrab（DirectX 捕获），下载 DX 优化版？") {
+		if !hasDDAGrab {
+			if askYN("系统 ffmpeg 不支持 ddagrab（DXGI 桌面捕获），下载新版本？") {
 				downloadAndExtract()
 				if _, err := os.Stat(local); err == nil {
 					ffmpegPath = local
-					hasDXGI = checkDXGI(local)
+					hasDDAGrab = checkDDAGrab(local)
 				}
 			}
-			// 用户拒绝下载 → 继续使用 PATH 中的 ffmpeg（gdigrab 回退）
-			if !hasDXGI {
+			if !hasDDAGrab {
 				log.Printf("→ 使用系统 ffmpeg（gdigrab 模式）")
 			}
 		}
@@ -93,11 +90,11 @@ func detectFFmpeg() {
 	}
 
 	// 3) 系统中完全找不到 ffmpeg → 提示下载
-	if askYN("未找到 ffmpeg，自动下载 DX 优化版？") {
+	if askYN("未找到 ffmpeg，自动下载？") {
 		downloadAndExtract()
 		if _, err := os.Stat(local); err == nil {
 			ffmpegPath = local
-			hasDXGI = checkDXGI(local)
+			hasDDAGrab = checkDDAGrab(local)
 			useFFmpeg = true
 			return
 		}
@@ -130,7 +127,7 @@ func detectGPUVendor() string {
 // 按 GPU 品牌 + ffmpeg 编码器可用性构建编码器列表。
 // 优先级：GPU 硬件编码器 → libx264（最终回退）。
 // libx264 始终放在列表末尾，确保所有硬件编码器失败后直接使用 CPU 编码。
-// 注意：h264_mf 在 gdigrab 下不可用（无输出），故不加入回退链。
+// 注意：h264_mf 不加入回退链（无论 gdigrab/ddagrab 均不可靠）。
 func detectH264Encoder() {
 	if len(h264Encoders) > 0 {
 		return
@@ -202,10 +199,11 @@ func resolveDownloadURL() string {
 	return ""
 }
 
-// checkDXGI 检查指定 ffmpeg 是否支持 dxgigrab 设备（DirectX 桌面捕获）
-func checkDXGI(path string) bool {
-	out, err := exec.Command(path, "-hide_banner", "-devices").Output()
-	return err == nil && strings.Contains(string(out), "dxgigrab")
+// checkDDAGrab 检查指定 ffmpeg 是否支持 ddagrab 滤镜（DXGI 桌面捕获）。
+// ddagrab 是 FFmpeg 6.0+ 内置的 video source filter，底层使用 Windows Desktop Duplication API。
+func checkDDAGrab(path string) bool {
+	out, err := exec.Command(path, "-hide_banner", "-filters").Output()
+	return err == nil && strings.Contains(string(out), "ddagrab")
 }
 
 // downloadAndExtract 下载 ffmpeg 压缩包并解压到 ffmpeg_local/ 目录。
