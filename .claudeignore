@@ -1,0 +1,30 @@
+# 前端依赖（npm/pnpm 安装目录，数万个文件无需扫描）
+views/node_modules/
+
+# 前端构建产物（Vite 生成，Go embed 使用，编译后自动更新）
+static/
+
+# IDE 配置
+.idea/
+*.iml
+.vscode/
+
+# Go 构建产物
+*.exe
+*.pem
+web-rdp
+
+# ffmpeg 本地安装目录（二进制文件，无需扫描）
+/ffmpeg_local/
+
+# 测试覆盖率
+*.out
+*.test
+coverage/
+
+# 依赖锁文件（大型自动生成文件，非源码）
+views/pnpm-lock.yaml
+views/package-lock.json
+
+# Go 模块缓存（若存在）
+vendor/
