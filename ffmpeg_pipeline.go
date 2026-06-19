@@ -141,29 +141,31 @@ func startFFmpeg(id, quality, maxW, fps int, h264 bool) *ffSession {
 	// -vf 链只处理后续纯系统内存的格式转换，GPU 编码器可直接接受 bgra 帧。
 
 	refreshRate := 60
-	if useDDAGrab {
-		if fps > 0 {
-			refreshRate = fps // 用户手动指定帧率，不压上限（用户知道自己在干什么）
-		} else {
+	if useDDAGrab && fps > 0 {
+		// 手动指定帧率：不压上限，用户知道自己在干什么
+		refreshRate = fps
+	} else {
+		if useDDAGrab {
 			if r := getDisplayRefreshRate(id); r > 0 {
-				refreshRate = r // 自动检测屏幕刷新率
+				refreshRate = r // ddagrab 自动检测屏幕刷新率
 			}
-			// 分辨率自适应帧率上限：仅在自动模式下生效，避免编码器帧积压。
-			// 700M 像素/秒对 NVENC/Turing+ 安全，4K 约 84fps，1440p 约 140fps。
-			const maxPPS = 700_000_000
-			if px := capW * capH; px > 0 {
-				if capFPS := maxPPS / px; refreshRate > capFPS {
-					refreshRate = capFPS
-				}
+		}
+		// 分辨率自适应帧率上限：自动模式下统一生效（ddagrab 和 gdigrab），
+		// 避免编码器帧积压。700M 像素/秒对 NVENC/Turing+ 安全，
+		// 4K 约 84fps，1440p 约 140fps。
+		const maxPPS = 700_000_000
+		if px := capW * capH; px > 0 {
+			if capFPS := maxPPS / px; refreshRate > capFPS {
+				refreshRate = capFPS
 			}
-			// MJPEG: cap auto framerate at 60fps. JPEG has no inter-frame
-			// compression; higher rates waste bandwidth and overwhelm the client.
-			if !h264 && refreshRate > 60 {
-				refreshRate = 60
-			}
-			if refreshRate < 60 {
-				refreshRate = 60
-			}
+		}
+		// MJPEG: cap auto framerate at 60fps. JPEG has no inter-frame
+		// compression; higher rates waste bandwidth and overwhelm the client.
+		if !h264 && refreshRate > 60 {
+			refreshRate = 60
+		}
+		if refreshRate < 60 {
+			refreshRate = 60
 		}
 	}
 
