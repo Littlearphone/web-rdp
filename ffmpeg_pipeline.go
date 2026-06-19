@@ -29,13 +29,47 @@ var (
 type ffSession struct {
 	cmd        *exec.Cmd     // ffmpeg 子进程
 	stdout     *bufio.Reader // 缓冲读取 ffmpeg stdout 管道
-	frameCh    chan []byte   // 解码后的帧数据通道
+	frameCh    chan []byte   // h264Reader/mjpegReader → fan-out goroutine
 	stopCh     chan struct{} // 停止信号通道
 	stderrBuf  *bytes.Buffer // ffmpeg stderr（用于诊断编码器报错）
 	stderrDone chan struct{} // stderr 读取完成的信号
+
+	subsMu sync.Mutex
+	subs   map[int]chan []byte // 订阅者通道
+	nextID int
 }
 
-// stop 终止 ffmpeg 进程并关闭帧通道
+// subscribe 注册订阅者，返回 (订阅ID, 独立帧通道)。
+// 每个用户获得自己的帧通道，fan-out goroutine 复制每帧给所有订阅者。
+func (f *ffSession) subscribe() (int, <-chan []byte) {
+	f.subsMu.Lock()
+	defer f.subsMu.Unlock()
+	id := f.nextID
+	f.nextID++
+	ch := make(chan []byte, 3)
+	if f.subs == nil {
+		f.subs = make(map[int]chan []byte)
+	}
+	f.subs[id] = ch
+	return id, ch
+}
+
+// unsubscribe 注销订阅者并关闭其通道
+func (f *ffSession) unsubscribe(id int) {
+	f.subsMu.Lock()
+	defer f.subsMu.Unlock()
+	if ch, ok := f.subs[id]; ok {
+		delete(f.subs, id)
+		for {
+			select {
+			case <-ch:
+			default:
+				close(ch)
+				return
+			}
+		}
+	}
+}
 func (f *ffSession) stop() {
 	if f.cmd != nil {
 		close(f.stopCh)
@@ -232,6 +266,44 @@ func startFFmpeg(id, quality, maxW, fps int, h264 bool) *ffSession {
 	} else {
 		go mjpegReader(ff)
 	}
+
+	// 扇出 goroutine：读取 frameCh 的每帧，复制给所有订阅者。
+	// 解决多用户共享 ffSession 时 Go channel 单消费者导致帧被"瓜分"、
+	// H.264 解码器缺参考帧花屏的问题。
+	go func() {
+		for frame := range ff.frameCh {
+			ff.subsMu.Lock()
+			for _, ch := range ff.subs {
+				if frame == nil {
+					// ffmpeg 异常退出通知 — 转发给所有订阅者
+					select {
+					case ch <- nil:
+					default:
+					}
+				} else {
+					// 丢掉最旧帧保留最新帧, 确保低延迟
+					select {
+					case ch <- frame:
+					default:
+						select {
+						case <-ch:
+						default:
+						}
+						ch <- frame
+					}
+				}
+			}
+			ff.subsMu.Unlock()
+		}
+		// frameCh 关闭 → 关闭所有订阅通道
+		ff.subsMu.Lock()
+		for _, ch := range ff.subs {
+			close(ch)
+		}
+		ff.subs = nil
+		ff.subsMu.Unlock()
+	}()
+
 	return ff
 }
 

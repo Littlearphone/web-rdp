@@ -51,6 +51,8 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 	var ff *ffSession
 	var useH264 atomic.Bool // H.264 优先，原子操作避免 data race
 	var curScreen int = -1
+	var subID int
+	var subCh <-chan []byte
 	ip := r.RemoteAddr
 	if idx := strings.LastIndex(ip, ":"); idx != -1 {
 		ip = ip[:idx]
@@ -59,6 +61,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 
 	defer func() {
 		if ff != nil {
+			ff.unsubscribe(subID)
 			releaseFFmpeg(curScreen)
 		}
 		// 断开时释放该用户的控制权
@@ -225,6 +228,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			h264 := useH264.Load()
 			if ff == nil || ffScreen != id || ffQ != q || ffMW != mw || ffFPS != fps || ffH264 != h264 {
 				if ff != nil {
+					ff.unsubscribe(subID)
 					releaseFFmpeg(curScreen)
 				}
 				ff = acquireFFmpeg(id, q, mw, fps, h264)
@@ -242,6 +246,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 					time.Sleep(time.Second)
 					continue
 				}
+				subID, subCh = ff.subscribe()
 				ffScreen = id
 				curScreen = id
 				ffQ = q
@@ -261,8 +266,9 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 
 			var data []byte
 			select {
-			case data = <-ff.frameCh:
+			case data = <-subCh:
 				if data == nil {
+					ff.unsubscribe(subID)
 					releaseFFmpeg(curScreen) // 清理池中已死的 session，避免 acquireFFmpeg 复用
 					ff = nil
 					ffScreen = -1
@@ -281,6 +287,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				return
 			case <-time.After(5 * time.Second):
 				log.Printf("ffmpeg 无帧")
+				ff.unsubscribe(subID)
 				releaseFFmpeg(curScreen)
 				ff = nil
 				ffScreen = -1
