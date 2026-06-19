@@ -59,3 +59,12 @@ export interface InitMsg {
   user?: string;
   format?: string;
 }
+
+/** 控制权限状态 */
+export type ControlStatus = 'idle' | 'pending' | 'granted' | 'denied' | 'busy';
+
+/** 控制状态消息（服务器推送的权限请求结果） */
+export interface ControlStatusMsg {
+  control_status?: ControlStatus;
+  control_msg?: string;
+}

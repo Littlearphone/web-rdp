@@ -92,13 +92,14 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
-import { NSelect, NSlider, NSwitch, NTooltip } from 'naive-ui';
+import { NSelect, NSlider, NSwitch, NTooltip, useNotification } from 'naive-ui';
 import { useAppStore } from '@/stores/app';
 import { buildResolutions, buildFPSOptions } from '@/composables/useResolutionOptions';
 import { useWebSocket } from '@/composables/useWebSocket';
 
 const store = useAppStore();
 const { connect } = useWebSocket();
+const notification = useNotification();
 
 const screenOptions = computed(() => {
   const opts = [];
@@ -133,27 +134,82 @@ function onFPSChange(v: number) {
 // ── 控制权 ──
 const controlOn = ref(false);
 const controlDisabled = computed(() => {
+  // 正在等待审批时禁用开关
+  if (store.controlStatus === 'pending') return true;
+  // 他人控制时禁用
   if (!store.statsOwner) return false;
   return store.statsOwner !== store.statsUser;
 });
 const controlTitle = computed(() => {
+  if (store.controlStatus === 'pending') return '等待宿主确认...';
   return store.statsOwner
     ? `${store.statsOwner} 正在控制`
     : '打开开关获取控制权';
 });
 const controlTip = computed(() => {
+  if (store.controlStatus === 'pending') return '请求中...';
+  if (store.controlStatus === 'denied' || store.controlStatus === 'busy')
+    return store.controlMsg || '控制';
   return store.statsOwner
     ? `${store.statsOwner} 正在控制`
     : '控制';
 });
 
+// 监听服务器推送的 owner 更新，同步开关状态
 watch(() => store.statsOwner, (owner) => {
   controlOn.value = owner === store.statsUser;
+  if (owner === store.statsUser) {
+    store.controlStatus = 'idle';
+    store.controlMsg = '';
+  }
+});
+
+// 监听控制状态变化，同步开关 + 弹 toast 通知
+watch(() => store.controlStatus, (status) => {
+  if (status === 'granted') {
+    controlOn.value = true;
+    notification.success({
+      title: '控制权已获取',
+      description: '您现在可以控制远程桌面',
+      duration: 3000,
+    });
+  } else if (status === 'denied') {
+    controlOn.value = false;
+    notification.warning({
+      title: '控制请求被拒绝',
+      description: store.controlMsg || '宿主拒绝了您的控制请求',
+      duration: 5000,
+    });
+  } else if (status === 'busy') {
+    controlOn.value = false;
+    notification.info({
+      title: '控制权不可用',
+      description: store.controlMsg || '其他用户正在控制此电脑',
+      duration: 4000,
+    });
+  } else if (status === 'pending') {
+    notification.info({
+      title: '请求已发送',
+      description: '等待宿主确认控制权限...',
+      duration: 2000,
+    });
+  }
 });
 
 function onControlToggle(v: boolean) {
-  controlOn.value = v;
-  store.send({ control: v });
+  if (v) {
+    // 用户开启控制 → 发送请求，等待服务端审批
+    controlOn.value = false; // 先复位，等服务器确认后再打开
+    store.controlStatus = 'pending';
+    store.controlMsg = '等待宿主确认...';
+    store.send({ control: true });
+  } else {
+    // 用户关闭控制 → 直接释放
+    controlOn.value = false;
+    store.controlStatus = 'idle';
+    store.controlMsg = '';
+    store.send({ control: false });
+  }
 }
 
 function onH264Toggle(v: boolean) {

@@ -1,5 +1,6 @@
 <template>
   <n-config-provider :theme="darkTheme" :locale="zhCN" style="height: 100%">
+    <n-notification-provider>
     <div id="main">
       <!-- 桌面端顶栏 -->
       <DesktopControls v-if="!store.isMobile" />
@@ -22,12 +23,13 @@
 
     <!-- 重连覆盖层（固定定位） -->
     <ConnectionOverlay />
+    </n-notification-provider>
   </n-config-provider>
 </template>
 
 <script setup lang="ts">
 import { onMounted } from 'vue';
-import { darkTheme, zhCN, NConfigProvider } from 'naive-ui';
+import { darkTheme, zhCN, NConfigProvider, NNotificationProvider } from 'naive-ui';
 import { useAppStore } from '@/stores/app';
 import { useWebSocket } from '@/composables/useWebSocket';
 import { useKeyboardCapture } from '@/composables/useKeyboardCapture';

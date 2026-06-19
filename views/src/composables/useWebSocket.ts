@@ -7,7 +7,7 @@
  */
 
 import { useAppStore } from '@/stores/app';
-import type { InitMsg, StatsMsg, StreamFormat } from '@/types';
+import type { InitMsg, StatsMsg, ControlStatusMsg, StreamFormat } from '@/types';
 
 type BinaryHandler = (data: ArrayBuffer, format: 'h264' | 'jpeg') => void;
 
@@ -28,7 +28,23 @@ export function useWebSocket() {
   function onMessage(event: MessageEvent) {
     if (typeof event.data === 'string') {
       try {
-        const s = JSON.parse(event.data) as InitMsg & StatsMsg;
+        const s = JSON.parse(event.data) as InitMsg & StatsMsg & ControlStatusMsg;
+
+        // 控制权限状态
+        if (s.control_status) {
+          store.controlStatus = s.control_status;
+          store.controlMsg = s.control_msg || '';
+          // granted/denied/busy 2 秒后重置为空闲（让提示消息有一定展示时间）
+          if (s.control_status === 'granted' || s.control_status === 'denied' || s.control_status === 'busy') {
+            setTimeout(() => {
+              if (store.controlStatus === s.control_status) {
+                store.controlStatus = 'idle';
+                store.controlMsg = '';
+              }
+            }, 2000);
+          }
+          return; // 控制状态消息不含其他数据
+        }
 
         // 用户名（首次连接）
         if (s.user) {

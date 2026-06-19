@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -248,6 +249,19 @@ func main() {
 	// ── HTTP 鼠标点击端点（低延迟点击，不走 WebSocket）──
 	http.HandleFunc("/click", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
+		// 权限检查：仅控制权持有者可以执行点击
+		ip := r.RemoteAddr
+		if idx := strings.LastIndex(ip, ":"); idx != -1 {
+			ip = ip[:idx]
+		}
+		userName := userNameFor(ip)
+		controlMu.Lock()
+		owner := controlOwner
+		controlMu.Unlock()
+		if owner != "" && owner != userName {
+			http.Error(w, "permission denied", http.StatusForbidden)
+			return
+		}
 		x, e1 := strconv.Atoi(r.URL.Query().Get("x"))
 		y, e2 := strconv.Atoi(r.URL.Query().Get("y"))
 		if e1 != nil || e2 != nil {

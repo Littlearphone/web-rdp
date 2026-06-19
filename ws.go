@@ -61,6 +61,9 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 		if ff != nil {
 			releaseFFmpeg(curScreen)
 		}
+		// 断开时释放该用户的控制权
+		releaseControl(userName)
+		closeActiveDialog()
 		_ = conn.Close()
 	}()
 
@@ -72,6 +75,24 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 	}
 	if b, _ := json.Marshal(map[string]string{"user": userName, "format": format}); b != nil {
 		_ = conn.WriteMessage(websocket.TextMessage, b)
+	}
+
+	// ── 输出通道（提前创建，供 reader goroutine 发送状态消息）──
+	outCh := make(chan wsMessage, 256)
+
+	// 发送 goroutine（单写 WebSocket，单通道保证顺序）
+	go func() {
+		for msg := range outCh {
+			_ = conn.WriteMessage(msg.msgType, msg.data)
+		}
+	}()
+
+	// sendStatus 是一个便捷函数，向客户端发送 JSON 状态消息
+	sendStatus := func(status, msg string) {
+		b, _ := json.Marshal(map[string]string{"control_status": status, "control_msg": msg})
+		if b != nil {
+			outCh <- wsMessage{websocket.TextMessage, b}
+		}
 	}
 
 	// ── 控制消息接收 ──
@@ -100,16 +121,16 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				if cm.Fps != nil && *cm.Fps >= 0 {
 					currentFPS.Store(int32(*cm.Fps))
 				}
-				if cm.Text != nil && *cm.Text != "" {
+				if cm.Text != nil && *cm.Text != "" && hasControl(userName) {
 					doTypeText(*cm.Text)
 				}
-				if cm.Key != nil && cm.KeyDown != nil {
+				if cm.Key != nil && cm.KeyDown != nil && hasControl(userName) {
 					doKey(*cm.Key, *cm.KeyDown)
 				}
-				if cm.RX != nil && cm.RY != nil {
+				if cm.RX != nil && cm.RY != nil && hasControl(userName) {
 					doRightClick(int32(*cm.RX), int32(*cm.RY))
 				}
-				if cm.MX != nil && cm.MY != nil {
+				if cm.MX != nil && cm.MY != nil && hasControl(userName) {
 					_, _, _ = procSetCursorPos.Call(uintptr(*cm.MX), uintptr(*cm.MY))
 				}
 				if cm.Webcodecs != nil {
@@ -117,12 +138,34 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				}
 				if cm.Control != nil {
 					if *cm.Control {
-						acquireControl(userName)
+						// ── 异步权限请求流程 ──
+						status := requestControl(userName)
+						switch status {
+						case "granted":
+							sendStatus("granted", "")
+						case "denied":
+							sendStatus("denied", "宿主已永久拒绝您的控制请求")
+						case "busy":
+							controlMu.Lock()
+							owner := controlOwner
+							controlMu.Unlock()
+							sendStatus("busy", owner+" 正在控制此电脑，请稍后再试")
+						case "pending":
+							sendStatus("pending", "等待宿主确认...")
+							go doRequestControlWithDialog(userName, func(granted bool) {
+								if granted {
+									sendStatus("granted", "")
+								} else {
+									sendStatus("denied", "宿主拒绝了您的控制请求")
+								}
+							})
+						}
 					} else {
 						releaseControl(userName)
+						closeActiveDialog()
 					}
 				}
-				if cm.DX1 != nil {
+				if cm.DX1 != nil && hasControl(userName) {
 					doDrag(int32(*cm.DX1), int32(*cm.DY1), int32(*cm.DX2), int32(*cm.DY2))
 				}
 				continue
@@ -151,15 +194,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 		cachedBounds image.Rectangle
 		cachedZoom   float64
 		cacheFrame   int
-		outCh        = make(chan wsMessage, 256) // 大缓冲 + H.264 阻塞发送避免丢帧
 	)
-
-	// 发送 goroutine（单写 WebSocket，单通道保证顺序）
-	go func() {
-		for msg := range outCh {
-			_ = conn.WriteMessage(msg.msgType, msg.data)
-		}
-	}()
 
 	for {
 		id := int(currentID.Load())

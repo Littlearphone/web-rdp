@@ -51,7 +51,7 @@ export function basePh(ph: number): number {
 /** 生成 FPS 选项（仅 ddagrab 模式可见） */
 export function buildFPSOptions(maxRate: number): { label: string; value: number }[] {
   const opts: { label: string; value: number }[] = [
-    { label: '自动', value: 0 },
+    { label: '自动帧率', value: 0 },
   ];
   for (const r of [maxRate, 120, 90, 60, 30, 15]) {
     if (r < maxRate && r >= 15 && !opts.find(o => o.value === r)) {

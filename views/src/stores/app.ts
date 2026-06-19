@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-import type { Meta, ResolutionOption, StreamFormat, ConnectionStatus } from '@/types';
+import type { Meta, ResolutionOption, StreamFormat, ConnectionStatus, ControlStatus } from '@/types';
 
 export const useAppStore = defineStore('app', () => {
   // ═══════════════════════════════════════════
@@ -56,6 +56,12 @@ export const useAppStore = defineStore('app', () => {
   const mobileUIBuilt = ref(false);
   const lastResKey = ref('');
   const isMobile = ref(false);
+
+  // ═══════════════════════════════════════════
+  // 控制权限状态
+  // ═══════════════════════════════════════════
+  const controlStatus = ref<ControlStatus>('idle');
+  const controlMsg = ref('');
 
   // ═══════════════════════════════════════════
   // 计算属性
@@ -124,6 +130,7 @@ export const useAppStore = defineStore('app', () => {
     statsUser, statsFps, statsEncMs, statsKb, statsW, statsH, statsQ,
     statsOwner, statsMaxRate,
     mobileResOpts, mobileUIBuilt, lastResKey, isMobile,
+    controlStatus, controlMsg,
     // 计算属性
     basePw, basePh, serverAddr, canH264,
     // 操作
