@@ -35,7 +35,6 @@ var (
 	_sysInfo       = _u32.NewProc("SystemParametersInfoW")
 	_sendMsg       = _u32.NewProc("SendMessageW")
 	_loadIco       = _u32.NewProc("LoadIconW")
-	_getCurThrId   = _k32.NewProc("GetCurrentThreadId")
 	_getClientRect = _u32.NewProc("GetClientRect")
 
 	_creatFont = _g32.NewProc("CreateFontW")
@@ -43,8 +42,6 @@ var (
 	_setBkMode = _g32.NewProc("SetBkMode")
 	_setTxtCol = _g32.NewProc("SetTextColor")
 	_fillRect  = _u32.NewProc("FillRect")
-
-	_postThreadMsg = _u32.NewProc("PostThreadMessageW")
 )
 
 // ═══════════════════════════ 常量 ═══════════════════════════
@@ -70,7 +67,6 @@ const (
 	WM_NCHITTEST      = 0x0084
 	WM_ERASEBKGND     = 0x0014
 	WM_CLOSE          = 0x0010
-	WM_QUIT           = 0x0012
 	HTCAPTION         = 2
 	TRANSPARENT       = 1
 	IDI_INFORMATION   = 32516
@@ -109,10 +105,9 @@ var (
 
 // 跨线程关闭支持
 var (
-	activeDlgHwnd     uintptr
-	activeDlgUser     string
-	activeDlgThreadId uint32
-	activeDlgMu       sync.Mutex
+	activeDlgHwnd uintptr
+	activeDlgUser string
+	activeDlgMu   sync.Mutex
 )
 
 // ═══════════════════════════ 辅助函数 ═══════════════════════════
@@ -183,7 +178,9 @@ func permWndProc(hwnd, msg, wp, lp uintptr) uintptr {
 		}
 		_permResultBtnID = id
 		_permResultReady = true
-		_, _, _ = _postQuit.Call(0)
+		// ★ 先销毁窗口再退出消息循环，与 WM_CLOSE 路径一致。
+		// 不能只调 PostQuitMessage —— 那样窗口不会被销毁，会残留在屏幕上。
+		_, _, _ = _dstWnd.Call(hwnd) // DestroyWindow → WM_DESTROY → PostQuitMessage
 		return 0
 
 	case WM_CLOSE:
@@ -361,6 +358,11 @@ func runDarkDialog(header, body string, buttons []permBtn,
 		_, _, _ = _dispMsg.Call(uintptr(unsafe.Pointer(&msg[0])))
 	}
 
+	// ★ 解锁 OS 线程：消息循环已结束，不再需要固定线程。
+	// 必须在 return 前调用，否则 goroutine 退出时会直接终止 OS 线程，
+	// 导致线程池频繁创建/销毁，可能触发下一个弹窗的消息循环卡死。
+	runtime.UnlockOSThread()
+
 	if _permResultReady {
 		return _permResultBtnID, _permResultRemember
 	}
@@ -403,14 +405,16 @@ func hasControl(user string) bool {
 func closeActiveDialog() {
 	activeDlgMu.Lock()
 	hwnd := activeDlgHwnd
-	threadId := activeDlgThreadId
 	activeDlgHwnd = 0
 	activeDlgUser = ""
-	activeDlgThreadId = 0
 	activeDlgMu.Unlock()
 
-	if hwnd != 0 && threadId != 0 {
-		_, _, _ = _postThreadMsg.Call(uintptr(threadId), WM_QUIT, 0, 0)
+	if hwnd != 0 {
+		// ★ 发送 WM_CLOSE 而非 PostThreadMessage(WM_QUIT)。
+		// WM_QUIT 只退出消息循环但不销毁窗口 —— 窗口会变成孤儿窗口卡在屏幕上。
+		// WM_CLOSE 会触发 DestroyWindow → WM_DESTROY → PostQuitMessage，
+		// 既销毁窗口又退出消息循环。
+		_, _, _ = _sendMsg.Call(hwnd, WM_CLOSE, 0, 0)
 	}
 }
 
@@ -438,7 +442,6 @@ func showActiveControlDialog(userName string) {
 		if activeDlgUser == userName {
 			activeDlgUser = ""
 			activeDlgHwnd = 0
-			activeDlgThreadId = 0
 		}
 		activeDlgMu.Unlock()
 	}()
@@ -454,8 +457,6 @@ func showActiveControlDialog(userName string) {
 		func(hwnd uintptr) {
 			activeDlgMu.Lock()
 			activeDlgHwnd = hwnd
-			tid, _, _ := _getCurThrId.Call()
-			activeDlgThreadId = uint32(tid)
 			activeDlgMu.Unlock()
 		}, 440, 190)
 
