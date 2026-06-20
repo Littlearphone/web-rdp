@@ -175,15 +175,19 @@ func removeRTCSession(userName string) {
 }
 
 // writeWebRTCSample 向全局视频轨写入 H.264 编码帧。
+// duration 应为相邻帧的理论间隔（如 60fps → ~16.7ms），用于 RTP 时间戳插值。
 // 非阻塞：Track 满或无订阅者时静默丢弃，避免反压阻塞 ffmpeg 管道。
 // 由 ffmpeg_pipeline.go 的 fan-out goroutine 调用。
-func writeWebRTCSample(data []byte) {
+func writeWebRTCSample(data []byte, dur time.Duration) {
 	if webRTCTrack == nil {
 		return
 	}
+	if dur <= 0 {
+		dur = time.Second / 30 // 兜底
+	}
 	sample := media.Sample{
 		Data:     data,
-		Duration: time.Second / 30, // 假设 30fps，仅用于 RTP 时间戳插值
+		Duration: dur,
 	}
 	// 静默忽略写入失败（无 PeerConnection 订阅时 track 返回错误）
 	_ = webRTCTrack.WriteSample(sample)
