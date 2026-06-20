@@ -362,12 +362,12 @@ func h264Args(useDDAGrab bool, id, refreshRate, cx, cy, cw, ch int, vf string, q
 	base = append(base, "-vf", vf)
 
 	// ── 画质映射：滑块 30-100 → 编码器 CQ/CRF 值（0-51，越小画质越高）──
-	//   100 → 25（曾为 12，过高画质导致编码器过载）
+	//   100 → 28（曾为 25，降低极限画质避免编码器过载帧时间不可预测）
 	//    75 → 35（默认中点）
 	//    30 → 48（最低画质）
 	var hq int
 	if quality >= 75 {
-		hq = 35 - (quality-75)*10/25
+		hq = 35 - (quality-75)*7/25
 	} else {
 		hq = 35 + (75-quality)*13/45
 	}
@@ -386,26 +386,29 @@ func h264Args(useDDAGrab bool, id, refreshRate, cx, cy, cw, ch int, vf string, q
 	// 下限 2000k（250KB）确保 4K 分辨率下 IDR 帧不撑爆 VBV。
 	pxPerSec := cw * ch * refreshRate
 	bpp := 0.03 + float64(quality)*0.0012
+	if bpp > 0.10 {
+		bpp = 0.10 // 硬封 0.10 bpp，防高画质+高帧率下 maxrate 失控
+	}
 	maxBr := int(bpp * float64(pxPerSec) / 1_000_000)
 	if maxBr < 1 {
 		maxBr = 1
 	}
 	maxRateStr := strconv.Itoa(maxBr) + "M"
-	bufSize := maxBr * 200 // kbits，约 0.2 秒缓冲
+	bufSize := maxBr * 100 // kbits，约 0.1 秒缓冲（曾为 0.2s，缩窄防突发）
 	if bufSize < 2000 {
 		bufSize = 2000 // 最低 250KB，确保大 IDR 帧能放进 VBV
 	}
-	if bufSize > 16000 {
-		bufSize = 16000 // 最高 2MB，防止极端高码率下 VBV 过大
+	if bufSize > 8000 {
+		bufSize = 8000 // 最高 1MB（曾为 2MB），收窄 VBV 上限
 	}
 	bufSizeStr := strconv.Itoa(bufSize) + "k"
 
 	enc := currentH264Encoder()
 	switch enc {
 	case "h264_nvenc":
-		// NVIDIA：p1=最快, ll=低延迟, vbr+cq+maxrate+bufsize(1帧缓冲)
+		// NVIDIA：p1=最快, ll=低延迟, vbr+cq+maxrate+bufsize, rc-lookahead=0 关闭前瞻
 		base = append(base, "-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ll",
-			"-rc", "vbr", "-cq", hqs, "-maxrate", maxRateStr, "-bufsize", bufSizeStr, "-g", "60")
+			"-rc", "vbr", "-cq", hqs, "-maxrate", maxRateStr, "-bufsize", bufSizeStr, "-rc-lookahead", "0", "-g", "60")
 	case "h264_amf":
 		// AMD：speed=最快, cqp+bufsize 约束峰值
 		base = append(base, "-c:v", "h264_amf", "-quality", "speed",
