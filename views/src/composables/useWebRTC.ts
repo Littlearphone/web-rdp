@@ -2,9 +2,15 @@
  * WebRTC 视频传输管理
  *
  * 内网直连模式（无 STUN/TURN），通过 RTCPeerConnection 接收 H.264 视频轨。
- * 使用隐藏 <video> 元素接收解码，rAF 绘制到 canvas，与现有渲染管线并行。
+ * 使用隐藏 <video> 元素接收解码，绘制到 canvas，与现有渲染管线并行。
  *
  * 信令通过 WebSocket 交换（SDP Offer/Answer + ICE Candidates）。
+ *
+ * 高帧率防抖策略（180fps 源 → 60Hz 显示器）：
+ *   1. playoutDelayHint=50ms 限制 jitter buffer，缓冲满时自动丢旧帧防堆积
+ *   2. VFC (VideoFrameCallback) 精确感知新帧到达 → 置脏标记
+ *   3. rAF 以显示器刷新率绘制，多帧间只取最后一帧（自动跳帧）
+ *   4. 退路：无 VFC 支持的浏览器回退到纯 rAF + currentTime 变化检测
  *
  * 用法:
  *   const rtc = startWebRTC(canvas, sendJson, onFirstFrame);
@@ -63,27 +69,75 @@ export function startWebRTC(
   });
 
   let firstFrameFired = false;
+
+  // ── rAF 渲染调度状态 ──
   let rafId = 0;
+  let vfcId = 0;
+  let hasNewFrame = false; // VFC 置 true，rAF 消费后置 false
+  let lastDrawnTime = 0;   // video.currentTime 上次绘制值（VFC 不可用时用于去重）
+
+  // 检测 requestVideoFrameCallback 支持
+  const hasVFC = typeof (video as HTMLVideoElement & {
+    requestVideoFrameCallback?: (cb: () => void) => number;
+  }).requestVideoFrameCallback === 'function';
 
   // 接收远程视频轨 → 设置 video.srcObject
   pc.ontrack = (event: RTCTrackEvent) => {
     console.log('[WebRTC] 收到远程视频轨:', event.track.kind);
+
+    // ── 限制抖动缓冲区：远程桌面场景低延迟优先 ──
+    // 不设置时浏览器默认 200-500ms，180fps 持续输入下缓冲累积可达数秒延迟。
+    // 设 50ms（~3 帧 @60fps），缓冲满时 WebRTC 栈自动丢旧包而非无限堆积。
+    if (event.receiver &&
+        (event.receiver as RTCRtpReceiver & { playoutDelayHint?: number }).playoutDelayHint !== undefined) {
+      (event.receiver as RTCRtpReceiver & { playoutDelayHint: number }).playoutDelayHint = 0.05;
+      console.log('[WebRTC] jitter buffer 上限: 50ms');
+    }
+
     const stream = event.streams[0];
     if (!stream) return;
+
+    // 避免重复设置同一个 stream（ontrack 可能因 renegotiation 重复触发）
+    if (video.srcObject === stream) return;
     video.srcObject = stream;
     video.play().catch(() => { /* autoplay policy */ });
 
     if (!firstFrameFired) {
-      // 启动 rAF 渲染循环
-      const render = () => {
-        rafId = requestAnimationFrame(render);
+      startRenderLoop();
+    }
+  };
+
+  /** 启动渲染循环，根据浏览器能力选择最优策略 */
+  function startRenderLoop() {
+    lastDrawnTime = 0;
+    hasNewFrame = false;
+
+    if (hasVFC) {
+      // ── 策略 A：VFC + rAF 双轨制 ──
+      // VFC 精确捕获解码器输出新帧（可 > 显示器刷新率），仅置脏标记。
+      // rAF 按显示器刷新率消费脏标记，多次 VFC 间只绘制最后一帧。
+      const onVideoFrame = () => {
+        hasNewFrame = true;
+        // 重新注册必须在本次回调内，确保下一帧也不漏
+        vfcId = (video as HTMLVideoElement & {
+          requestVideoFrameCallback: (cb: () => void) => number;
+        }).requestVideoFrameCallback(onVideoFrame);
+      };
+      vfcId = (video as HTMLVideoElement & {
+        requestVideoFrameCallback: (cb: () => void) => number;
+      }).requestVideoFrameCallback(onVideoFrame);
+
+      const onRaf = () => {
+        rafId = requestAnimationFrame(onRaf);
+        if (!hasNewFrame) return;
+        hasNewFrame = false;
+
         if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
 
         const vw = video.videoWidth;
         const vh = video.videoHeight;
         if (vw === 0 || vh === 0) return;
 
-        // 分辨率变化时调整 canvas
         if (canvas.width !== vw || canvas.height !== vh) {
           canvas.width = vw;
           canvas.height = vh;
@@ -96,9 +150,39 @@ export function startWebRTC(
           onFirstFrame?.();
         }
       };
-      rafId = requestAnimationFrame(render);
+      rafId = requestAnimationFrame(onRaf);
+
+    } else {
+      // ── 策略 B：纯 rAF + currentTime 去重 ──
+      // requestVideoFrameCallback 不可用时的回退方案
+      const onRaf = () => {
+        rafId = requestAnimationFrame(onRaf);
+
+        if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+
+        // currentTime 未变 → 解码器无新帧输出，跳过绘制
+        if (video.currentTime === lastDrawnTime) return;
+        lastDrawnTime = video.currentTime;
+
+        const vw = video.videoWidth;
+        const vh = video.videoHeight;
+        if (vw === 0 || vh === 0) return;
+
+        if (canvas.width !== vw || canvas.height !== vh) {
+          canvas.width = vw;
+          canvas.height = vh;
+        }
+
+        ctx.drawImage(video, 0, 0);
+
+        if (!firstFrameFired) {
+          firstFrameFired = true;
+          onFirstFrame?.();
+        }
+      };
+      rafId = requestAnimationFrame(onRaf);
     }
-  };
+  }
 
   // ICE candidate → 通过 WebSocket 发送给后端
   pc.onicecandidate = (event: RTCPeerConnectionIceEvent) => {
@@ -111,18 +195,11 @@ export function startWebRTC(
   pc.onconnectionstatechange = () => {
     console.log('[WebRTC] 连接状态:', pc.connectionState);
     if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-      // 连接断开时清理（但不清除 canvas 上的最后一帧）
       cleanup();
     }
   };
 
-  const session = {
-    pc,
-    video,
-    canvas,
-    ctx,
-    onFirstFrame: onFirstFrame ?? null,
-  };
+  const session = { pc, video, canvas, ctx, onFirstFrame: onFirstFrame ?? null };
   webrtcSession = session;
 
   const control: WebRTCControl = {
@@ -167,18 +244,18 @@ export function startWebRTC(
       cancelAnimationFrame(rafId);
       rafId = 0;
     }
-    // 停止 video 播放但不立即移除 DOM（避免 canvas 闪白）
+    if (vfcId && hasVFC) {
+      (video as HTMLVideoElement & { cancelVideoFrameCallback?: (id: number) => void })
+        .cancelVideoFrameCallback?.(vfcId);
+      vfcId = 0;
+    }
     video.pause();
     video.srcObject = null;
     setTimeout(() => {
-      if (video.parentNode) {
-        video.parentNode.removeChild(video);
-      }
+      if (video.parentNode) video.parentNode.removeChild(video);
     }, 100);
     pc.close();
-    if (webrtcSession === session) {
-      webrtcSession = null;
-    }
+    if (webrtcSession === session) webrtcSession = null;
   }
 
   return control;
@@ -188,4 +265,63 @@ export function startWebRTC(
 export function isWebRTCConnected(): boolean {
   return webrtcSession !== null &&
     webrtcSession.pc.connectionState === 'connected';
+}
+
+export interface WebRTCReceiveStats {
+  fps: number;       // 接收帧率（framesPerSecond 或推算值）
+  jitterMs: number;  // 抖动缓冲延迟（ms）
+  packetsLost: number; // 累计丢包数
+}
+
+let lastStatsTimestamp = 0;
+let lastStatsFramesReceived = 0;
+
+/** 获取 WebRTC 接收统计（供自适应码率上报使用） */
+export async function pollWebRTCStats(): Promise<WebRTCReceiveStats | null> {
+  const s = webrtcSession;
+  if (!s || s.pc.connectionState !== 'connected') return null;
+
+  try {
+    const report = await s.pc.getStats(null);
+    let framesReceived = 0;
+    let framesPerSecond = 0;
+    let jitterBufferDelay = 0;
+    let jitterBufferDelayCount = 0;
+    let packetsLost = 0;
+
+    report.forEach((stat) => {
+      if (stat.type === 'inbound-rtp' && stat.kind === 'video') {
+        framesReceived = stat.framesReceived ?? 0;
+        framesPerSecond = stat.framesPerSecond ?? 0;
+        packetsLost = stat.packetsLost ?? 0;
+        const jbd = stat.jitterBufferDelay;
+        const jbe = stat.jitterBufferEmittedCount;
+        if (typeof jbd === 'number' && typeof jbe === 'number' && jbe > 0) {
+          jitterBufferDelay = jbd;
+          jitterBufferDelayCount = jbe;
+        }
+      }
+    });
+
+    // framesPerSecond 在某些实现中不可用，用帧计数差值推算
+    let fps = framesPerSecond;
+    if (fps <= 0 && framesReceived > 0) {
+      const now = performance.now();
+      if (lastStatsTimestamp > 0 && framesReceived > lastStatsFramesReceived) {
+        const dt = (now - lastStatsTimestamp) / 1000;
+        fps = dt > 0.2 ? (framesReceived - lastStatsFramesReceived) / dt : 0;
+      }
+      lastStatsTimestamp = now;
+      lastStatsFramesReceived = framesReceived;
+    }
+
+    // 平均抖动缓冲延迟
+    const jitterMs = jitterBufferDelayCount > 0
+      ? (jitterBufferDelay / jitterBufferDelayCount) * 1000
+      : 0;
+
+    return { fps: Math.round(fps * 10) / 10, jitterMs: Math.round(jitterMs), packetsLost };
+  } catch {
+    return null;
+  }
 }

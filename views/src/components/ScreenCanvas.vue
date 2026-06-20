@@ -7,7 +7,7 @@ import { ref, onMounted, onUnmounted, watch } from 'vue';
 import { useAppStore } from '@/stores/app';
 import { registerBinaryHandler, registerWebRTCSignalHandler } from '@/composables/useWebSocket';
 import { screenCoords } from '@/composables/useCoordinateMapping';
-import { startWebRTC, type WebRTCControl } from '@/composables/useWebRTC';
+import { startWebRTC, pollWebRTCStats, type WebRTCControl } from '@/composables/useWebRTC';
 
 import { createH264Decoder, type H264Decoder } from '@/decoders/h264';
 import { createJpegDecoder, type JpegDecoder } from '@/decoders/jpeg';
@@ -72,7 +72,20 @@ let netFrameCount = 0;
 let netMaxQueue = 0;
 let netStatsTimer: ReturnType<typeof setInterval> | null = null;
 
-function reportNetStats() {
+async function reportNetStats() {
+  // WebRTC 活跃时从 getStats() 获取真实接收帧率和抖动缓冲延迟
+  if (store.webrtcActive) {
+    const stats = await pollWebRTCStats();
+    if (stats && stats.fps > 0) {
+      store.netFPS = stats.fps;
+      // 将抖动缓冲延迟映射为队列深度（ms → 帧数 ≈ ms/16@60fps）
+      store.netQueue = Math.round(stats.jitterMs / 16);
+      store.send({ net_fps: stats.fps, net_queue: store.netQueue });
+    }
+    return;
+  }
+
+  // WebSocket 路径：统计二进制帧接收量和解码队列
   const fps = netFrameCount / 2; // 2 秒内的平均帧率
   const queue = netMaxQueue;
   netFrameCount = 0;
