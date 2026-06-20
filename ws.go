@@ -405,6 +405,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 		ffFPS        = -1
 		ffH264       = false
 		h264Timeouts int // 连续超时计数，3 次后暂回退 MJPEG
+		totalBytes   int // 统计周期内累计字节数，用于计算实际码率
 		goJpgBuf     bytes.Buffer
 		frames       int
 		totalWait    time.Duration
@@ -669,6 +670,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 					maxWait = w
 				}
 			}
+			totalBytes += len(data)
 			lastFrame = now
 
 			if cacheFrame <= 0 || ffScreen != id {
@@ -718,7 +720,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				adaptActive, adaptQVal, adaptFpsVal := getAdaptStatus()
 				stat := statsMsg{
 					FPS: math.Round(fps*10) / 10, EncMs: math.Round(maxW*10) / 10,
-					KB: math.Round(float64(len(data))/102.4) / 10, Owner: controlOwner,
+					KB: math.Round(float64(totalBytes)/elapsed.Seconds()/102.4) / 10, Owner: controlOwner,
 					Ox: cachedBounds.Min.X, Oy: cachedBounds.Min.Y, Zoom: cachedZoom,
 					Q: q, W: cachedBounds.Dx(), H: cachedBounds.Dy(),
 					Screens: screenshot.NumActiveDisplays(), MaxRate: maxRate,
@@ -733,7 +735,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 					default:
 					}
 				}
-				frames, totalWait, maxWait, lastStats = 0, 0, 0, time.Now()
+				frames, totalBytes, totalWait, maxWait, lastStats = 0, 0, 0, 0, time.Now()
 			}
 			continue
 		}
@@ -769,6 +771,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 		select {
 		case outCh <- wsMessage{websocket.BinaryMessage, msg}:
 			frames++
+			totalBytes += len(msg)
 		default:
 		}
 
@@ -786,7 +789,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			adaptActive, adaptQVal, adaptFpsVal := getAdaptStatus()
 			stat := statsMsg{
 				FPS: math.Round(fps*10) / 10, EncMs: math.Round(maxW*10) / 10,
-				KB: math.Round(float64(len(msg))/102.4) / 10, Owner: controlOwner,
+				KB: math.Round(float64(totalBytes)/elapsed.Seconds()/102.4) / 10, Owner: controlOwner,
 				Ox: cachedBounds.Min.X, Oy: cachedBounds.Min.Y, Zoom: cachedZoom,
 				Q: q, W: cachedBounds.Dx(), H: cachedBounds.Dy(),
 				Screens: screenshot.NumActiveDisplays(), MaxRate: 60,
@@ -803,7 +806,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 					}
 				}
 			}
-			frames, totalWait, maxWait, lastStats = 0, 0, 0, time.Now()
+			frames, totalBytes, totalWait, maxWait, lastStats = 0, 0, 0, 0, time.Now()
 		}
 	}
 }

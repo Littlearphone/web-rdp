@@ -177,9 +177,9 @@ const isWebRTCSimplified = computed(() => store.webrtcActive);
 
 /** 带宽显示：自动选择 KB/s 或 MB/s */
 const bwText = computed(() => {
-  const kbps = store.statsKb * store.statsFps;
-  if (kbps >= 1000) return (kbps / 1024).toFixed(1) + 'MB/s';
-  return kbps.toFixed(0) + 'KB/s';
+  const kbs = store.statsKb;
+  if (kbs >= 1000) return (kbs / 1024).toFixed(1) + 'MB/s';
+  return kbs.toFixed(0) + 'KB/s';
 });
 
 const screenOptions = computed(() => {
