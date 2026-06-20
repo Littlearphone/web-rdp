@@ -34,9 +34,10 @@ type ffSession struct {
 	stderrBuf  *bytes.Buffer // ffmpeg stderr（用于诊断编码器报错）
 	stderrDone chan struct{} // stderr 读取完成的信号
 
-	subsMu sync.Mutex
-	subs   map[int]chan []byte // 订阅者通道
-	nextID int
+	subsMu     sync.Mutex
+	subs       map[int]chan []byte // 订阅者通道
+	nextID     int
+	sentFrames bool // h264Reader 是否成功发送过帧（用于判断编码器真实可用性）
 }
 
 // subscribe 注册订阅者，返回 (订阅ID, 独立帧通道)。
@@ -222,6 +223,12 @@ func startFFmpeg(id, quality, maxW, fps int, h264 bool) *ffSession {
 				refreshRate = capFPS
 			}
 		}
+		// H.264 自动模式上限 90fps：超高刷显示器（120Hz+）在
+		// 高分辨率下编码器可能跟不上采集速度，导致管道积压超时。
+		// 手动指定 fps 时不受此限制。
+		if h264 && refreshRate > 90 {
+			refreshRate = 90
+		}
 		// MJPEG: cap auto framerate at 60fps. JPEG has no inter-frame
 		// compression; higher rates waste bandwidth and overwhelm the client.
 		if !h264 && refreshRate > 60 {
@@ -367,14 +374,14 @@ func h264Args(useDDAGrab bool, id, refreshRate, cx, cy, cw, ch int, vf string, q
 	base = append(base, "-vf", vf)
 
 	// ── 画质映射：滑块 30-100 → 编码器 CQ/CRF 值（0-51，越小画质越高）──
-	//   100 → 12（极致画质）
-	//    75 → 28（默认）
+	//   100 → 25（曾为 12，过高画质导致编码器过载）
+	//    75 → 35（默认中点）
 	//    30 → 48（最低画质）
 	var hq int
 	if quality >= 75 {
-		hq = 28 - (quality-75)*16/25
+		hq = 35 - (quality-75)*10/25
 	} else {
-		hq = 28 + (75-quality)*20/45
+		hq = 35 + (75-quality)*13/45
 	}
 	if hq < 1 {
 		hq = 1
@@ -385,9 +392,10 @@ func h264Args(useDDAGrab bool, id, refreshRate, cx, cy, cw, ch int, vf string, q
 	hqs := strconv.Itoa(hq)
 
 	// ── 码率上限：基于像素率和画质的动态 maxrate ──
-	// 防止 CQ 模式在高画质时码率爆炸。不使用 bufsize —
-	// bufsize 配合 maxrate 会强制 VBV 约束，导致编码器在高动态场景
-	// 延迟帧以凑满 buffer，引发多秒级管线和解码器队列阻塞。
+	// 必须配合 bufsize 使用，否则 VBR/CRF 模式完全忽略 maxrate。
+	// bufsize = maxrate * 0.2s，够容纳大 IDR 帧（200-400KB），
+	// 但远低于秒级，不会引发多秒 VBV 缓冲延迟。
+	// 下限 2000k（250KB）确保 4K 分辨率下 IDR 帧不撑爆 VBV。
 	pxPerSec := cw * ch * refreshRate
 	bpp := 0.03 + float64(quality)*0.0012
 	maxBr := int(bpp * float64(pxPerSec) / 1_000_000)
@@ -395,26 +403,34 @@ func h264Args(useDDAGrab bool, id, refreshRate, cx, cy, cw, ch int, vf string, q
 		maxBr = 1
 	}
 	maxRateStr := strconv.Itoa(maxBr) + "M"
+	bufSize := maxBr * 200 // kbits，约 0.2 秒缓冲
+	if bufSize < 2000 {
+		bufSize = 2000 // 最低 250KB，确保大 IDR 帧能放进 VBV
+	}
+	if bufSize > 16000 {
+		bufSize = 16000 // 最高 2MB，防止极端高码率下 VBV 过大
+	}
+	bufSizeStr := strconv.Itoa(bufSize) + "k"
 
 	enc := currentH264Encoder()
 	switch enc {
 	case "h264_nvenc":
-		// NVIDIA：p1=最快, ll=低延迟, vbr+cq+maxrate(无bufsize)
+		// NVIDIA：p1=最快, ll=低延迟, vbr+cq+maxrate+bufsize(1帧缓冲)
 		base = append(base, "-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ll",
-			"-rc", "vbr", "-cq", hqs, "-maxrate", maxRateStr, "-g", "120")
+			"-rc", "vbr", "-cq", hqs, "-maxrate", maxRateStr, "-bufsize", bufSizeStr, "-g", "60")
 	case "h264_amf":
-		// AMD：speed=最快, cqp+maxrate
+		// AMD：speed=最快, cqp+bufsize 约束峰值
 		base = append(base, "-c:v", "h264_amf", "-quality", "speed",
-			"-rc", "cqp", "-qp_p", hqs, "-qp_i", hqs, "-maxrate", maxRateStr, "-g", "120")
+			"-rc", "cqp", "-qp_p", hqs, "-qp_i", hqs, "-maxrate", maxRateStr, "-bufsize", bufSizeStr, "-g", "60")
 	case "h264_qsv":
 		// Intel：veryfast, look_ahead=0 减少延迟
 		base = append(base, "-c:v", "h264_qsv", "-preset", "veryfast", "-look_ahead", "0",
-			"-async_depth", "1", "-g", "120", "-global_quality", hqs, "-maxrate", maxRateStr)
+			"-async_depth", "1", "-g", "60", "-global_quality", hqs, "-maxrate", maxRateStr, "-bufsize", bufSizeStr)
 	case "libx264":
-		// CPU 回退：ultrafast+zerolatency+crf+maxrate
+		// CPU 回退：ultrafast+zerolatency+crf+maxrate+bufsize
 		base = append(base, "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-			"-crf", hqs, "-g", "120", "-x264opts", "slices=1:threads=1",
-			"-maxrate", maxRateStr)
+			"-crf", hqs, "-g", "60", "-x264opts", "slices=1:threads=1",
+			"-maxrate", maxRateStr, "-bufsize", bufSizeStr)
 	default:
 		return nil
 	}
@@ -501,6 +517,7 @@ func h264Reader(ff *ffSession) {
 			ff.frameCh <- frame
 		}
 		sentFrames = true
+		ff.sentFrames = true
 		batch = batch[:0]
 	}
 

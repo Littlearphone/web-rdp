@@ -191,7 +191,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 
 	// ── 控制消息接收 ──
 	var currentID, currentQuality, currentMaxW, currentFPS atomic.Int32
-	currentQuality.Store(75)
+	currentQuality.Store(60) // 默认画质降至 60，减少编码器负载
 
 	// 剪贴板防回环：记录最后一次同步的文本和图像
 	var clipMu sync.Mutex
@@ -345,6 +345,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 		ffMW         = -1
 		ffFPS        = -1
 		ffH264       = false
+		h264Timeouts int // 连续超时计数，3 次后暂回退 MJPEG
 		goJpgBuf     bytes.Buffer
 		frames       int
 		totalWait    time.Duration
@@ -425,6 +426,23 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 		q, mw, fps := int(currentQuality.Load()), int(currentMaxW.Load()), int(currentFPS.Load())
 
 		if useFFmpeg {
+			// ── MJPEG → H.264 定期重试 ──
+			// 曾工作过的编码器仅因过载超时（非兼容性问题），
+			// 冷却 30s 后重试，避免永久困在 MJPEG。
+			if !useH264.Load() && hasWorkingH264Encoder() &&
+				!h264FallbackTime.IsZero() && time.Since(h264FallbackTime) > 30*time.Second {
+				if retryH264Encoders() {
+					useH264.Store(true)
+					if ff != nil {
+						ff.unsubscribe(subID)
+						releaseFFmpeg(curScreen)
+						ff = nil
+						ffScreen = -1
+						curScreen = -1
+					}
+				}
+			}
+
 			// ── ffmpeg 路径 ──
 			h264 := useH264.Load()
 			paramsChanged := ffQ != q || ffMW != mw || ffFPS != fps || ffH264 != h264
@@ -498,35 +516,80 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			select {
 			case data = <-subCh:
 				if data == nil {
+					// 记录当前编码器是否曾成功输出帧（用于判断是兼容性问题还是过载）
+					hadFrames := ff != nil && ff.sentFrames
+					encName := ""
+					if ffH264 {
+						encName = currentH264Encoder()
+					}
+
 					ff.unsubscribe(subID)
 					releaseFFmpeg(curScreen)
 					ff = nil
 					ffScreen = -1
 					curScreen = -1
-					if ffH264 && tryNextH264Encoder() {
-						continue
-					}
+
 					if ffH264 {
-						useH264.Store(false)
-						log.Printf("所有 H.264 编码器已耗尽，回退到 MJPEG")
+						if hadFrames {
+							// 编码器曾工作 → 标记可用，重试同一编码器
+							markH264EncoderWorked(encName)
+							h264Timeouts++
+							if h264Timeouts >= 3 {
+								useH264.Store(false)
+								h264FallbackTime = time.Now()
+								h264Timeouts = 0
+								log.Printf("[%s] %s 连续3次异常退出，暂回退 MJPEG（30s 后重试）", userName, encName)
+							} else {
+								log.Printf("[%s] %s 异常退出（%d/3），重试同一编码器", userName, encName, h264Timeouts)
+							}
+						} else if tryNextH264Encoder() {
+							// 编码器从未输出帧 → 兼容性问题，尝试下一个
+							continue
+						} else {
+							useH264.Store(false)
+							h264FallbackTime = time.Now()
+							log.Printf("所有 H.264 编码器已耗尽，回退到 MJPEG")
+						}
 					}
 					continue
 				}
+				h264Timeouts = 0 // 帧正常到达，清零超时计数
 			case <-readErr:
 				return
-			case <-time.After(5 * time.Second):
+			case <-time.After(8 * time.Second):
 				log.Printf("[%s] ffmpeg 超时无帧 display=%d", userName, curScreen)
+
+				hadFrames := ff != nil && ff.sentFrames
+				encName := ""
+				if ffH264 {
+					encName = currentH264Encoder()
+				}
+
 				ff.unsubscribe(subID)
 				releaseFFmpeg(curScreen)
 				ff = nil
 				ffScreen = -1
 				curScreen = -1
-				if ffH264 && tryNextH264Encoder() {
-					continue
-				}
+
 				if ffH264 {
-					useH264.Store(false)
-					log.Printf("H.264 编码器全部失败，回退 MJPEG")
+					if hadFrames {
+						markH264EncoderWorked(encName)
+						h264Timeouts++
+						if h264Timeouts >= 3 {
+							useH264.Store(false)
+							h264FallbackTime = time.Now()
+							h264Timeouts = 0
+							log.Printf("[%s] %s 连续3次超时，暂回退 MJPEG（30s 后重试）", userName, encName)
+						} else {
+							log.Printf("[%s] %s 超时（%d/3），重试同一编码器", userName, encName, h264Timeouts)
+						}
+					} else if tryNextH264Encoder() {
+						continue
+					} else {
+						useH264.Store(false)
+						h264FallbackTime = time.Now()
+						log.Printf("H.264 编码器全部失败，回退 MJPEG")
+					}
 				}
 				continue
 			}

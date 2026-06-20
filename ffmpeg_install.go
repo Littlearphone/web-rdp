@@ -23,6 +23,11 @@ var (
 	useFFmpeg    bool
 	h264Encoders []string // 可用编码器列表（GPU优先，CPU回退）
 	h264EncIdx   int      // 当前使用的编码器索引
+
+	// h264EncoderEverWorked 记录哪些编码器曾成功输出过帧。
+	// 曾工作的编码器仅因过载超时，不是兼容性问题，应定期重试。
+	h264EncoderEverWorked = make(map[string]bool)
+	h264FallbackTime      time.Time // 回退到 MJPEG 的时间，用于冷却后重试
 )
 
 // 返回当前选中的 H.264 编码器名称
@@ -33,7 +38,9 @@ func currentH264Encoder() string {
 	return ""
 }
 
-// 编码器失败时切换到下一个可用编码器，返回是否还有可用选项
+// 编码器失败时切换到下一个可用编码器，返回是否还有可用选项。
+// 仅对从未成功输出帧的编码器执行永久回退；曾工作过的编码器
+// 仅因过载超时，不在此处永久跳过（由调用方根据 sentFrames 决定）。
 func tryNextH264Encoder() bool {
 	h264EncIdx++
 	if h264EncIdx < len(h264Encoders) {
@@ -41,6 +48,35 @@ func tryNextH264Encoder() bool {
 		return true
 	}
 	return false
+}
+
+// markH264EncoderWorked 标记指定编码器曾成功输出过帧（真实可用，非兼容性问题）。
+func markH264EncoderWorked(name string) {
+	if name != "" {
+		h264EncoderEverWorked[name] = true
+	}
+}
+
+// hasWorkingH264Encoder 检查是否存在曾成功输出帧的 H.264 编码器。
+func hasWorkingH264Encoder() bool {
+	for _, name := range h264Encoders {
+		if h264EncoderEverWorked[name] {
+			return true
+		}
+	}
+	return false
+}
+
+// retryH264Encoders 将编码器索引重置到起始位置，用于 MJPEG 冷却后重新尝试 H.264。
+// 返回是否有可用编码器。
+func retryH264Encoders() bool {
+	if len(h264Encoders) == 0 {
+		return false
+	}
+	h264EncIdx = 0
+	h264FallbackTime = time.Time{}
+	log.Printf("H.264 编码器重试 → %s", h264Encoders[0])
+	return true
 }
 
 // detectFFmpeg 自动检测系统中的 ffmpeg 可执行文件。
