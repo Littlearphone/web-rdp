@@ -316,7 +316,7 @@ func startFFmpeg(id, quality, maxW, fps int, h264 bool) *ffSession {
 			// WebRTC 路径：H.264 帧额外写入全局视频轨（非阻塞，静默丢弃）
 			// 按实际帧率计算帧间隔，确保 RTP 时间戳与真实帧率匹配
 			if frame != nil && ff.isH264 && ff.fps > 0 {
-				writeWebRTCSample(frame, time.Second/time.Duration(ff.fps))
+				writeWebRTCSample(ff.display, frame, time.Second/time.Duration(ff.fps))
 			}
 		}
 		// frameCh 关闭 → 关闭所有订阅通道

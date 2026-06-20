@@ -175,6 +175,14 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 	// ── 输出通道（提前创建，供 reader goroutine 发送状态消息）──
 	outCh := make(chan wsMessage, 7)
 
+	// 共享 WebSocket 发送函数（reader goroutine + 主循环均可用）
+	sendJSON := func(data []byte) {
+		select {
+		case outCh <- wsMessage{websocket.TextMessage, data}:
+		default:
+		}
+	}
+
 	// 发送 goroutine（单写 WebSocket，单通道保证顺序）
 	go func() {
 		for msg := range outCh {
@@ -355,14 +363,8 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				}
 				// ── WebRTC 信令处理 ──
 				if cm.RTCWebRTC != nil && *cm.RTCWebRTC && webRTCEnabled() {
-					// 前端告知支持 WebRTC → 创建 PeerConnection + 生成 Offer
-					sendFn := func(data []byte) {
-						select {
-						case outCh <- wsMessage{websocket.TextMessage, data}:
-						default:
-						}
-					}
-					offer, err := createRTCSession(userName, sendFn)
+					// 前端告知支持 WebRTC → 创建 PeerConnection + 生成 Offer（仅含当前显示器 Track）
+					offer, err := createRTCSession(userName, int(currentID.Load()), sendJSON)
 					if err != nil {
 						log.Printf("[%s] WebRTC 会话创建失败: %v", userName, err)
 					} else {
@@ -562,6 +564,10 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				}
 				ffPoolMu.Unlock()
 
+				// 显示器切换且当前为 H.264 → 重建 WebRTC 会话以绑定新 Track
+				if ffScreen != id && ffH264 && webRTCEnabled() {
+					restartRTCForDisplay(userName, id, sendJSON)
+				}
 				ffScreen = id
 				curScreen = id
 				cacheFrame = 0

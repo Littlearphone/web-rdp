@@ -5,7 +5,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch } from 'vue';
 import { useAppStore } from '@/stores/app';
-import { registerBinaryHandler, registerWebRTCSignalHandler } from '@/composables/useWebSocket';
+import { registerBinaryHandler, registerWebRTCSignalHandler, registerWebRTCRestartHandler } from '@/composables/useWebSocket';
 import { screenCoords } from '@/composables/useCoordinateMapping';
 import { startWebRTC, pollWebRTCStats, type WebRTCControl } from '@/composables/useWebRTC';
 
@@ -325,6 +325,17 @@ onMounted(() => {
   if (store.connectionStatus === 'connected') {
     tryStartWebRTC();
   }
+
+  // 后端通知 WebRTC 重建（显示器切换 → Track 变更）
+  registerWebRTCRestartHandler(() => {
+    console.log('[WebRTC] 收到重启通知，重建 PeerConnection');
+    if (webrtc) {
+      webrtc.close();
+      webrtc = null;
+    }
+    store.webrtcActive = false;
+    tryStartWebRTC();
+  });
 });
 
 // WS 连接成功 → 尝试启动 WebRTC
@@ -361,6 +372,7 @@ onUnmounted(() => {
   store.webrtcActive = false;
   registerBinaryHandler(() => {});
   registerWebRTCSignalHandler(() => {});
+  registerWebRTCRestartHandler(() => {});
   if (netStatsTimer) {
     clearInterval(netStatsTimer);
     netStatsTimer = null;

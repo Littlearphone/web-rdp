@@ -27,6 +27,14 @@ export function registerWebRTCSignalHandler(fn: (msg: Record<string, unknown>) =
   webRTCSignalHandler = fn;
 }
 
+// ── WebRTC 重启回调（后端切换显示器时触发）──
+let webRTCRestartHandler: (() => void) | null = null;
+
+/** 注册 WebRTC 重启处理器（ScreenCanvas 调用，后端通知重建 PeerConnection） */
+export function registerWebRTCRestartHandler(fn: () => void) {
+  webRTCRestartHandler = fn;
+}
+
 /** SHA-256 摘要（用于认证 challenge-response） */
 async function sha256Hex(s: string): Promise<string> {
   const buf = new TextEncoder().encode(s);
@@ -83,6 +91,12 @@ export function useWebSocket() {
         // ── WebRTC 信令转发 ──
         if ((s.rtc_sdp || s.rtc_ice) && webRTCSignalHandler) {
           webRTCSignalHandler(s as unknown as Record<string, unknown>);
+          return;
+        }
+
+        // ── WebRTC 重启（后端切换显示器时通知前端重建 PeerConnection）──
+        if (s.rtc_restart && webRTCRestartHandler) {
+          webRTCRestartHandler();
           return;
         }
 

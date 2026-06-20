@@ -87,6 +87,7 @@ export interface InitMsg {
   clipboard_image?: string;
   rtc_sdp?: string;
   rtc_ice?: Record<string, unknown>;
+  rtc_restart?: boolean;
 }
 
 /** 控制权限状态 */
