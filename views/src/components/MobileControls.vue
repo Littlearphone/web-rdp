@@ -66,6 +66,16 @@ function updateResOptions() {
 
 watch([() => store.basePw, () => store.basePh], updateResOptions, { immediate: true });
 
+// H.264/WebRTC 模式下自动拉满参数
+watch(() => store.webrtcActive, (active) => {
+  if (active && store.streamFormat === 'h264') {
+    let changed = false;
+    if (store.currentQ !== 100) { store.currentQ = 100; changed = true; }
+    if (store.currentMW !== 0) { store.currentMW = 0; changed = true; }
+    if (changed) store.sendSettings();
+  }
+});
+
 // ── 操作 ──
 function cycleScreen() {
   if (store.screenCount > 1) {

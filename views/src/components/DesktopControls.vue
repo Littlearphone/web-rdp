@@ -172,10 +172,8 @@ const notification = useNotification();
 /** 当前用户是否为控制者（仅控制者可见流配置项） */
 const isController = computed(() => store.statsOwner === store.statsUser);
 
-/** H.264 模式下简化 UI：隐藏画质/分辨率/FPS，参数拉满靠自适应 + GCC */
-const isWebRTCSimplified = computed(() =>
-  store.streamFormat === 'h264' && isController.value,
-);
+/** WebRTC 模式下简化 UI：隐藏画质/分辨率/FPS，参数拉满靠自适应 + GCC */
+const isWebRTCSimplified = computed(() => store.webrtcActive);
 
 /** 带宽显示：自动选择 KB/s 或 MB/s */
 const bwText = computed(() => {
@@ -305,16 +303,16 @@ function toggleAdaptMode() {
   store.send({ adapt_mode: store.adaptMode });
 }
 
-// H.264 模式下自动拉满参数，让 GCC + 自适应全权接管
-watch(() => store.streamFormat, (fmt) => {
-  if (fmt === 'h264' && isController.value) {
-    const maxFPS = store.statsMaxRate > 0 ? store.statsMaxRate : 60;
-    let changed = false;
-    if (store.currentQ !== 100) { store.currentQ = 100; changed = true; }
-    if (store.currentMW !== 0) { store.currentMW = 0; changed = true; }
-    if (store.currentFPS !== maxFPS) { store.currentFPS = maxFPS; changed = true; }
-    if (changed) store.sendSettings();
-  }
+// WebRTC 模式下自动拉满参数，让 GCC + 自适应全权接管。
+// 仅 WebRTC 触发的拉满，WS 模式保留用户手动控制。
+watch(() => store.webrtcActive, (active) => {
+  if (!active || store.streamFormat !== 'h264') return;
+  const maxFPS = store.statsMaxRate > 0 ? store.statsMaxRate : 60;
+  let changed = false;
+  if (store.currentQ !== 100) { store.currentQ = 100; changed = true; }
+  if (store.currentMW !== 0) { store.currentMW = 0; changed = true; }
+  if (store.currentFPS !== maxFPS) { store.currentFPS = maxFPS; changed = true; }
+  if (changed) store.sendSettings();
 });
 
 const showEditNameDialog = ref(false);

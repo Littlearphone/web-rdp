@@ -192,7 +192,15 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 
 	// ── 控制消息接收 ──
 	var currentID, currentQuality, currentMaxW, currentFPS atomic.Int32
-	currentQuality.Store(60) // 默认画质降至 60，减少编码器负载
+	// WebRTC 模式：前端通过 ?h264=1 URL 参数提前告知，在进入主循环前拉满参数。
+	// 非 WebRTC（WS JPEG / WS H.264 手动模式）使用默认值，用户可手动调节。
+	if r.URL.Query().Get("h264") == "1" && currentH264Encoder() != "" {
+		currentQuality.Store(100) // 最高画质
+		currentMaxW.Store(0)      // 原始分辨率
+		// fps 保持零值（自动跟随显示器刷新率）
+	} else {
+		currentQuality.Store(60) // 默认画质
+	}
 
 	// 剪贴板防回环：记录最后一次同步的文本和图像
 	var clipMu sync.Mutex

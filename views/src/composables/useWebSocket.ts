@@ -203,7 +203,11 @@ export function useWebSocket() {
 
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
     let wsUrl = `${proto}://${store.serverAddr}/ws`;
-    if (savedUser) wsUrl += `?user=${encodeURIComponent(savedUser)}`;
+    const params: string[] = [];
+    if (savedUser) params.push(`user=${encodeURIComponent(savedUser)}`);
+    // 提前告知后端本客户端将启用 H.264/WebRTC，让后端在创建编码池前拉满参数
+    if (store.useH264 && store.canH264) params.push('h264=1');
+    if (params.length) wsUrl += '?' + params.join('&');
     const wsInst = new WebSocket(wsUrl);
     wsInst.binaryType = 'arraybuffer';
 

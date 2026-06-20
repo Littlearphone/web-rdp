@@ -213,9 +213,10 @@ func startFFmpeg(id, quality, maxW, fps int, h264 bool) *ffSession {
 		// 手动指定帧率：前端下拉框传明确值，不压上限
 		refreshRate = fps
 	} else {
-		// fps=0：未指定帧率（初始连接），默认 60fps
-		// 不再自动检测屏幕刷新率 — 前端已去掉"自动帧率"选项，
-		// 用户可从下拉框显式选择更高帧率（上限 min(屏幕刷新率, 144)）
+		// fps=0：自动检测当前显示器刷新率（WebRTC 模式可直接跑满）
+		if r := getDisplayRefreshRate(id); r > 0 {
+			refreshRate = r
+		}
 	}
 
 	var args []string
