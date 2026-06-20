@@ -158,8 +158,26 @@ function onContextMenu(e: MouseEvent) {
   store.send({ rx: coords.fx, ry: coords.fy });
 }
 
-/** 粘贴事件：将浏览器剪贴板文本发送到远程 */
-function onPaste(e: ClipboardEvent) {
+/** 粘贴事件：将浏览器剪贴板内容（文本或图像）发送到远程 */
+async function onPaste(e: ClipboardEvent) {
+  // 先检查图像（优先于文本，因为截图粘贴通常包含图像）
+  const items = e.clipboardData?.items;
+  if (items) {
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.startsWith('image/')) {
+        const blob = items[i].getAsFile();
+        if (blob) {
+          try {
+            const buf = await blob.arrayBuffer();
+            const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+            store.send({ clipboard_image: b64 });
+            return; // 图像优先，不发送文本
+          } catch (_) { /* 读取失败 */ }
+        }
+      }
+    }
+  }
+  // 回退：检查纯文本
   const text = e.clipboardData?.getData('text/plain');
   if (text) {
     store.send({ clipboard: text });
@@ -167,16 +185,12 @@ function onPaste(e: ClipboardEvent) {
 }
 
 /** copy 事件：浏览器复制后同步到远程剪贴板 */
-function onCopy() {
-  // 延迟读取，确保 clipboard API 已更新
-  setTimeout(async () => {
-    try {
-      const text = await navigator.clipboard.readText();
-      if (text && text !== store.remoteClipboard) {
-        store.send({ clipboard: text });
-      }
-    } catch (_) { /* 权限不足 */ }
-  }, 50);
+function onCopy(e: ClipboardEvent) {
+  // 优先使用同步 API（copy 事件中 clipboardData 一定可用）
+  const text = e.clipboardData?.getData('text/plain');
+  if (text && text !== store.remoteClipboard) {
+    store.send({ clipboard: text });
+  }
 }
 
 function bindDesktopEvents() {

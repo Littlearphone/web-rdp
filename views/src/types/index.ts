@@ -38,6 +38,7 @@ export interface CtrlMsg {
   fps?: number;
   user?: string;
   clipboard?: string;
+  clipboard_image?: string;
   auth?: string;
 }
 
@@ -67,6 +68,7 @@ export interface InitMsg {
   fps?: number;
   challenge?: string;
   clipboard?: string;
+  clipboard_image?: string;
 }
 
 /** 控制权限状态 */

@@ -45,6 +45,23 @@ export function useWebSocket() {
     }
   }
 
+  /** 从远端同步剪贴板图像（base64 PNG）到浏览器 */
+  async function applyRemoteClipboardImage(b64: string) {
+    try {
+      const byteChars = atob(b64);
+      const bytes = new Uint8Array(byteChars.length);
+      for (let i = 0; i < byteChars.length; i++) {
+        bytes[i] = byteChars.charCodeAt(i);
+      }
+      const blob = new Blob([bytes], { type: 'image/png' });
+      await navigator.clipboard.write([
+        new ClipboardItem({ 'image/png': blob })
+      ]);
+    } catch (_) {
+      // 非 HTTPS 或权限不足时静默失败
+    }
+  }
+
   // ═══════════════════════════════════════════
   // WebSocket 消息处理
   // ═══════════════════════════════════════════
@@ -57,6 +74,12 @@ export function useWebSocket() {
         // 剪贴板推送（后端 → 前端）
         if (s.clipboard) {
           applyRemoteClipboard(s.clipboard);
+          return;
+        }
+
+        // 剪贴板图像推送（后端 → 前端）
+        if (s.clipboard_image) {
+          applyRemoteClipboardImage(s.clipboard_image);
           return;
         }
 

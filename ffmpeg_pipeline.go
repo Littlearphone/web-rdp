@@ -46,7 +46,7 @@ func (f *ffSession) subscribe() (int, <-chan []byte) {
 	defer f.subsMu.Unlock()
 	id := f.nextID
 	f.nextID++
-	ch := make(chan []byte, 3)
+	ch := make(chan []byte, 6)
 	if f.subs == nil {
 		f.subs = make(map[int]chan []byte)
 	}
@@ -264,7 +264,7 @@ func startFFmpeg(id, quality, maxW, fps int, h264 bool) *ffSession {
 	ff := &ffSession{
 		cmd:        cmd,
 		stdout:     bufio.NewReaderSize(stdout, 256*1024),
-		frameCh:    make(chan []byte, 3),
+		frameCh:    make(chan []byte, 8),
 		stopCh:     make(chan struct{}),
 		stderrBuf:  new(bytes.Buffer),
 		stderrDone: make(chan struct{}),
@@ -427,6 +427,29 @@ func findStartCode(data []byte, start int) (int, int) {
 	return -1, 0
 }
 
+// isIDRFrame 检测 H.264 Annex B 帧中是否包含 IDR 切片（关键帧）。
+// IDR 帧是解码器参考链的起点，丢弃 IDR 帧会导致画面花屏直到下一个 IDR。
+// 因此我们保护 IDR 帧不被丢弃，只丢弃非 IDR（P/B）帧来缓解管道拥塞。
+func isIDRFrame(data []byte) bool {
+	for i := 0; i < len(data)-3; i++ {
+		if data[i] != 0 || data[i+1] != 0 {
+			continue
+		}
+		var nalType byte
+		if data[i+2] == 1 && i+3 < len(data) {
+			nalType = data[i+3] & 0x1F
+		} else if i+4 < len(data) && data[i+2] == 0 && data[i+3] == 1 {
+			nalType = data[i+4] & 0x1F
+		} else {
+			continue
+		}
+		if nalType == 5 { // IDR slice
+			return true
+		}
+	}
+	return false
+}
+
 // h264Reader 持续从 ffmpeg stdout 读取 H.264 Annex B 原始流，
 // 按 AUD (Access Unit Delimiter) 帧边界将 NAL 打包为完整编码帧，
 // 通过 frameCh 发送。每帧含 AUD + SPS/PPS/SEI + Slice 全部 NAL，
@@ -454,7 +477,17 @@ func h264Reader(ff *ffSession) {
 			copy(frame[off:], nal)
 			off += len(nal)
 		}
-		ff.frameCh <- frame
+		// 丢弃最旧帧保留最新帧。IDR 丢失仅短暂花屏（~0.85s），
+		// 远好过硬背压导致 ffmpeg stdout 堵塞的多秒卡死。
+		select {
+		case ff.frameCh <- frame:
+		default:
+			select {
+			case <-ff.frameCh:
+			default:
+			}
+			ff.frameCh <- frame
+		}
 		sentFrames = true
 		batch = batch[:0]
 	}

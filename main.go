@@ -10,10 +10,13 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"embed"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/pem"
 	"flag"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"io/fs"
 	"log"
@@ -293,6 +296,252 @@ func setClipboardText(text string) error {
 	return nil
 }
 
+// ═══════════════════ 剪贴板图像 (CF_DIB ↔ PNG) ═══════════════════
+
+// getClipboardImage 以 PNG 格式读取剪贴板中的图像数据。
+// 剪贴板图像格式为 CF_DIB（设备无关位图），转换为 PNG 便于网络传输。
+// 返回 nil 表示剪贴板中没有图像或读取失败。
+//
+// 重要：必须在 DIB→PNG 转换之前释放剪贴板锁和 CloseClipboard，
+// 否则 PNG 编码（耗时可达数百毫秒）期间整个系统的剪贴板都不可用。
+func getClipboardImage() []byte {
+	clipLock.Lock()
+
+	r, _, _ := procOpenClipboard.Call(0)
+	if r == 0 {
+		clipLock.Unlock()
+		return nil
+	}
+
+	// CF_DIB = 8
+	h, _, _ := procGetClipboardData.Call(8)
+	if h == 0 {
+		procCloseClipboard.Call()
+		clipLock.Unlock()
+		return nil
+	}
+
+	p, _, _ := procGlobalLock.Call(h)
+	if p == 0 {
+		procCloseClipboard.Call()
+		clipLock.Unlock()
+		return nil
+	}
+
+	sz, _, _ := procGlobalSize.Call(h)
+	if sz == 0 || sz > 50*1024*1024 {
+		procGlobalUnlock.Call(h)
+		procCloseClipboard.Call()
+		clipLock.Unlock()
+		return nil
+	}
+
+	// 复制 DIB 数据后立即释放所有剪贴板资源
+	dib := make([]byte, sz)
+	procRtlMoveMemory.Call(uintptr(unsafe.Pointer(&dib[0])), p, sz)
+	procGlobalUnlock.Call(h)
+	procCloseClipboard.Call()
+	clipLock.Unlock()
+
+	// 现在安全地进行昂贵的 PNG 编码，不持有任何锁
+	pngBytes, err := dibToPNG(dib)
+	if err != nil {
+		return nil
+	}
+	return pngBytes
+}
+
+// setClipboardImage 将 PNG 图像数据写入 Windows 剪贴板（CF_DIB 格式）。
+func setClipboardImage(pngData []byte) error {
+	img, err := png.Decode(bytes.NewReader(pngData))
+	if err != nil {
+		return fmt.Errorf("PNG 解码失败: %w", err)
+	}
+
+	dib, err := rgbaToDIB(img)
+	if err != nil {
+		return fmt.Errorf("DIB 转换失败: %w", err)
+	}
+
+	clipLock.Lock()
+	defer clipLock.Unlock()
+
+	r, _, _ := procOpenClipboard.Call(0)
+	if r == 0 {
+		return fmt.Errorf("OpenClipboard failed")
+	}
+	defer procCloseClipboard.Call()
+
+	_, _, _ = procEmptyClipboard.Call()
+
+	hMem, _, _ := procGlobalAlloc.Call(0x0002, uintptr(len(dib)))
+	if hMem == 0 {
+		return fmt.Errorf("GlobalAlloc failed")
+	}
+	p, _, _ := procGlobalLock.Call(hMem)
+	if p == 0 {
+		return fmt.Errorf("GlobalLock failed")
+	}
+	procRtlMoveMemory.Call(p, uintptr(unsafe.Pointer(&dib[0])), uintptr(len(dib)))
+	procGlobalUnlock.Call(hMem)
+
+	// CF_DIB = 8
+	d, _, _ := procSetClipboardData.Call(8, hMem)
+	if d == 0 {
+		return fmt.Errorf("SetClipboardData failed")
+	}
+	return nil
+}
+
+// dibToPNG 将 Windows DIB（设备无关位图）字节转换为 PNG 编码。
+// DIB = BITMAPINFOHEADER + color table (可选) + pixel data.
+// 支持 32-bit BGRA 和 24-bit BGR，BI_RGB 和 BI_BITFIELDS 压缩.
+func dibToPNG(dib []byte) ([]byte, error) {
+	if len(dib) < 40 {
+		return nil, fmt.Errorf("DIB too small: %d bytes", len(dib))
+	}
+
+	// 解析 BITMAPINFOHEADER
+	biWidth := int(int32(binary.LittleEndian.Uint32(dib[4:8])))
+	biHeight := int(int32(binary.LittleEndian.Uint32(dib[8:12])))
+	biBitCount := binary.LittleEndian.Uint16(dib[14:16])
+	biCompression := binary.LittleEndian.Uint32(dib[16:20])
+
+	if biWidth <= 0 || biWidth > 16384 || biHeight == 0 || (biHeight > 0 && biHeight > 16384) || (biHeight < 0 && -biHeight > 16384) {
+		return nil, fmt.Errorf("DIB dimensions out of range: %dx%d", biWidth, biHeight)
+	}
+
+	topDown := biHeight < 0
+	absHeight := biHeight
+	if absHeight < 0 {
+		absHeight = -absHeight
+	}
+
+	// 计算像素数据偏移（跳过 color table 和 bitfield masks）
+	offset := 40            // BITMAPINFOHEADER size
+	if biCompression == 3 { // BI_BITFIELDS
+		offset += 12 // 3 DWORD masks
+	}
+	if biBitCount <= 8 {
+		clrUsed := int(binary.LittleEndian.Uint32(dib[32:36]))
+		if clrUsed == 0 && biBitCount <= 8 {
+			clrUsed = 1 << biBitCount
+		}
+		offset += clrUsed * 4
+	}
+
+	if offset > len(dib) {
+		return nil, fmt.Errorf("DIB header overflow")
+	}
+
+	// 行对齐到 4 字节边界
+	rowSize := ((biWidth*int(biBitCount) + 31) / 32) * 4
+	expectedSize := offset + rowSize*absHeight
+	if len(dib) < expectedSize {
+		if len(dib) < offset+rowSize {
+			return nil, fmt.Errorf("DIB pixel data too small")
+		}
+		absHeight = (len(dib) - offset) / rowSize
+	}
+
+	img := image.NewRGBA(image.Rect(0, 0, biWidth, absHeight))
+
+	for row := 0; row < absHeight; row++ {
+		var srcRow int
+		if topDown {
+			srcRow = row
+		} else {
+			srcRow = absHeight - 1 - row // bottom-up DIB
+		}
+
+		srcOff := offset + srcRow*rowSize
+		if srcOff+rowSize > len(dib) {
+			break
+		}
+
+		dstOff := row * img.Stride
+		switch biBitCount {
+		case 32:
+			for x := 0; x < biWidth; x++ {
+				off := srcOff + x*4
+				if off+4 > len(dib) {
+					break
+				}
+				img.Pix[dstOff+x*4] = dib[off+2]   // R (BGRA → RGBA)
+				img.Pix[dstOff+x*4+1] = dib[off+1] // G
+				img.Pix[dstOff+x*4+2] = dib[off]   // B
+				img.Pix[dstOff+x*4+3] = 255        // A (ignore alpha from DIB)
+			}
+		case 24:
+			for x := 0; x < biWidth; x++ {
+				off := srcOff + x*3
+				if off+3 > len(dib) {
+					break
+				}
+				img.Pix[dstOff+x*4] = dib[off+2]   // R (BGR → RGBA)
+				img.Pix[dstOff+x*4+1] = dib[off+1] // G
+				img.Pix[dstOff+x*4+2] = dib[off]   // B
+				img.Pix[dstOff+x*4+3] = 255
+			}
+		default:
+			return nil, fmt.Errorf("unsupported DIB bit count: %d", biBitCount)
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// rgbaToDIB 将 Go image.Image 转换为 Windows DIB（32-bit BGRA, bottom-up）。
+func rgbaToDIB(img image.Image) ([]byte, error) {
+	bounds := img.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
+	if w <= 0 || h <= 0 || w > 16384 || h > 16384 {
+		return nil, fmt.Errorf("image dimensions out of range: %dx%d", w, h)
+	}
+
+	rowSize := ((w*32 + 31) / 32) * 4
+	dibSize := 40 + rowSize*h
+
+	dib := make([]byte, dibSize)
+
+	// BITMAPINFOHEADER (40 bytes)
+	binary.LittleEndian.PutUint32(dib[0:4], 40)                  // biSize
+	binary.LittleEndian.PutUint32(dib[4:8], uint32(w))           // biWidth
+	binary.LittleEndian.PutUint32(dib[8:12], uint32(h))          // biHeight (positive = bottom-up)
+	binary.LittleEndian.PutUint16(dib[12:14], 1)                 // biPlanes
+	binary.LittleEndian.PutUint16(dib[14:16], 32)                // biBitCount
+	binary.LittleEndian.PutUint32(dib[16:20], 0)                 // biCompression = BI_RGB
+	binary.LittleEndian.PutUint32(dib[20:24], uint32(rowSize*h)) // biSizeImage
+
+	rgba, ok := img.(*image.RGBA)
+	if !ok {
+		rgba = image.NewRGBA(bounds)
+		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+			for x := bounds.Min.X; x < bounds.Max.X; x++ {
+				rgba.Set(x, y, img.At(x, y))
+			}
+		}
+	}
+
+	for row := 0; row < h; row++ {
+		srcRow := h - 1 - row // bottom-up
+		srcOff := srcRow * rgba.Stride
+		dstOff := 40 + row*rowSize
+		for x := 0; x < w; x++ {
+			dib[dstOff+x*4] = rgba.Pix[srcOff+x*4+2]   // B
+			dib[dstOff+x*4+1] = rgba.Pix[srcOff+x*4+1] // G
+			dib[dstOff+x*4+2] = rgba.Pix[srcOff+x*4]   // R
+			dib[dstOff+x*4+3] = 0                      // A (ignored)
+		}
+	}
+
+	return dib, nil
+}
+
 // ── 认证 ──
 
 // genNonce 生成随机挑战字符串，存入池中并返回给客户端。
@@ -351,28 +600,29 @@ var upgrader = websocket.Upgrader{
 // ctrlMsg 定义 WebSocket 控制消息的 JSON 结构。
 // 所有字段均为可选指针，仅发送变更的字段以减少带宽
 type ctrlMsg struct {
-	Control   *bool   `json:"control,omitempty"`
-	Screen    *int    `json:"screen,omitempty"`
-	Quality   *int    `json:"quality,omitempty"`
-	MaxW      *int    `json:"maxw,omitempty"`
-	Key       *string `json:"key,omitempty"`
-	KeyDown   *bool   `json:"down,omitempty"`
-	Text      *string `json:"text,omitempty"`
-	RX        *int    `json:"rx,omitempty"`
-	RY        *int    `json:"ry,omitempty"`
-	DX1       *int    `json:"dx1,omitempty"`
-	DY1       *int    `json:"dy1,omitempty"`
-	DX2       *int    `json:"dx2,omitempty"`
-	DY2       *int    `json:"dy2,omitempty"`
-	MX        *int    `json:"mx,omitempty"`
-	MY        *int    `json:"my,omitempty"`
-	Webcodecs *bool   `json:"webcodecs,omitempty"`
-	Fps       *int    `json:"fps,omitempty"`
-	MouseBtn  *string `json:"mb,omitempty"`        // 鼠标按钮: "left" / "right"
-	MouseDn   *bool   `json:"md,omitempty"`        // true=按下 / false=释放
-	User      *string `json:"user,omitempty"`      // 修改用户名
-	Clipboard *string `json:"clipboard,omitempty"` // 剪贴板文本（双向同步）
-	Auth      *string `json:"auth,omitempty"`      // 认证响应: sha256(challenge+password) 或 "anonymous"
+	Control        *bool   `json:"control,omitempty"`
+	Screen         *int    `json:"screen,omitempty"`
+	Quality        *int    `json:"quality,omitempty"`
+	MaxW           *int    `json:"maxw,omitempty"`
+	Key            *string `json:"key,omitempty"`
+	KeyDown        *bool   `json:"down,omitempty"`
+	Text           *string `json:"text,omitempty"`
+	RX             *int    `json:"rx,omitempty"`
+	RY             *int    `json:"ry,omitempty"`
+	DX1            *int    `json:"dx1,omitempty"`
+	DY1            *int    `json:"dy1,omitempty"`
+	DX2            *int    `json:"dx2,omitempty"`
+	DY2            *int    `json:"dy2,omitempty"`
+	MX             *int    `json:"mx,omitempty"`
+	MY             *int    `json:"my,omitempty"`
+	Webcodecs      *bool   `json:"webcodecs,omitempty"`
+	Fps            *int    `json:"fps,omitempty"`
+	MouseBtn       *string `json:"mb,omitempty"`              // 鼠标按钮: "left" / "right"
+	MouseDn        *bool   `json:"md,omitempty"`              // true=按下 / false=释放
+	User           *string `json:"user,omitempty"`            // 修改用户名
+	Clipboard      *string `json:"clipboard,omitempty"`       // 剪贴板文本（双向同步）
+	ClipboardImage *string `json:"clipboard_image,omitempty"` // 剪贴板图像（base64 PNG，双向同步）
+	Auth           *string `json:"auth,omitempty"`            // 认证响应: sha256(challenge+password) 或 "anonymous"
 }
 
 // statsMsg 定义性能统计消息，每秒由后端推送到前端用于状态栏展示

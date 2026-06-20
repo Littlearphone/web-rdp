@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -171,7 +172,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 	}
 
 	// ── 输出通道（提前创建，供 reader goroutine 发送状态消息）──
-	outCh := make(chan wsMessage, 4)
+	outCh := make(chan wsMessage, 8)
 
 	// 发送 goroutine（单写 WebSocket，单通道保证顺序）
 	go func() {
@@ -192,10 +193,11 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 	var currentID, currentQuality, currentMaxW, currentFPS atomic.Int32
 	currentQuality.Store(75)
 
-	// 剪贴板防回环：记录最后一次同步的文本
+	// 剪贴板防回环：记录最后一次同步的文本和图像
 	var clipMu sync.Mutex
 	var lastClipSeq uint32
 	var lastClipText string
+	var lastClipImage []byte
 
 	readErr := make(chan struct{})
 	go func() {
@@ -312,6 +314,20 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 						log.Printf("剪贴板写入失败: %v", err)
 					}
 				}
+				// 剪贴板图像同步（前端推送 → 写入本地）
+				if cm.ClipboardImage != nil && hasControl(userName) {
+					pngData, err := base64.StdEncoding.DecodeString(*cm.ClipboardImage)
+					if err != nil {
+						log.Printf("剪贴板图像 base64 解码失败: %v", err)
+					} else {
+						clipMu.Lock()
+						lastClipImage = pngData
+						clipMu.Unlock()
+						if err := setClipboardImage(pngData); err != nil {
+							log.Printf("剪贴板图像写入失败: %v", err)
+						}
+					}
+				}
 				continue
 			}
 			id, err := strconv.Atoi(string(msg))
@@ -361,8 +377,28 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				lastClipSeq = seq
 				if text != "" && text != lastClipText {
 					lastClipText = text
+					lastClipImage = nil
 					clipMu.Unlock()
 					if b, _ := json.Marshal(map[string]string{"clipboard": text}); b != nil {
+						select {
+						case outCh <- wsMessage{websocket.TextMessage, b}:
+						default:
+						}
+					}
+					continue
+				}
+				clipMu.Unlock()
+
+				// 无文本变更，检查图像
+				img := getClipboardImage()
+				clipMu.Lock()
+				lastClipSeq = seq
+				if img != nil && !bytes.Equal(img, lastClipImage) {
+					lastClipImage = img
+					lastClipText = ""
+					clipMu.Unlock()
+					b64 := base64.StdEncoding.EncodeToString(img)
+					if b, _ := json.Marshal(map[string]string{"clipboard_image": b64}); b != nil {
 						select {
 						case outCh <- wsMessage{websocket.TextMessage, b}:
 						default:
@@ -512,7 +548,12 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 					int32(cachedBounds.Dx()), int32(cachedBounds.Dy()), cachedZoom, data)
 			}
 			if ffH264 {
-				outCh <- wsMessage{websocket.BinaryMessage, data}
+				// 非阻塞发送。IDR 丢失仅短暂花屏（~0.85s），
+				// 远好过硬背压造成多秒管道卡死。
+				select {
+				case outCh <- wsMessage{websocket.BinaryMessage, data}:
+				default:
+				}
 			} else {
 				select {
 				case outCh <- wsMessage{websocket.BinaryMessage, data}:

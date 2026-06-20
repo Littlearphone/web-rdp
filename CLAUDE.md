@@ -79,6 +79,7 @@ ffRefs[displayID] → int（引用计数，所有用户断开时停进程）
 - 池参数（`ffPoolQ/MW/FPS/H264`）在 `acquireFFmpeg` 后同步回调用方的 atomic 变量，确保非控制者的本地追踪变量与池一致
 - 支持 `ddagrab`（DXGI 零拷贝桌面捕获）和 `gdigrab`（传统 GDI）两种捕获模式
 - 像素率限制：每显示器 700M 像素/秒上限，防止编码器积压
+- H.264 帧丢弃：非 IDR 帧在 channel 满时丢弃旧帧保留新帧，IDR 关键帧阻塞送达确保解码器不花屏。h264Reader → frameCh → 扇出 → outCh 三级均可丢弃，防止管道反向阻塞 ffmpeg stdout
 
 ### 编码器回退链
 
@@ -209,7 +210,7 @@ types/index.ts                  TypeScript 类型定义
 
 ### 核心功能缺失（高优先级）
 
-- [x] **剪贴板同步**：双向文本剪贴板同步（前端 `navigator.clipboard` ↔ 后端 Windows Clipboard API）。已实现文本同步，待扩展图片和文件。
+- [x] **剪贴板同步**：双向文本 + 图像剪贴板同步。文本通过 `CF_UNICODETEXT` + JSON 消息同步；图像通过 `CF_DIB ↔ PNG` 转换 + base64 JSON 消息同步。前端 `onCopy` 使用同步 `e.clipboardData.getData()`（而非异步 `navigator.clipboard.readText()`）确保可靠性。前端 `onPaste` 支持 `ClipboardEvent.items` 中的 image/png 类型。
 - [x] **密码认证**：`-password` 参数，challenge-response (SHA-256) 认证。匿名用户（无密码）需宿主审批。待扩展：失败次数限制 + IP 冷却防暴力破解。
 - [ ] **音频传输**：后端 WASAPI Loopback 捕获系统音频 → ffmpeg Opus/AAC 编码 → 前端 Web Audio API 播放。与视频帧 PTS 时间戳对齐。
 
