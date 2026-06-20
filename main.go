@@ -626,6 +626,10 @@ type ctrlMsg struct {
 	Clipboard      *string `json:"clipboard,omitempty"`       // 剪贴板文本（双向同步）
 	ClipboardImage *string `json:"clipboard_image,omitempty"` // 剪贴板图像（base64 PNG，双向同步）
 	Auth           *string `json:"auth,omitempty"`            // 认证响应: sha256(challenge+password) 或 "anonymous"
+	// WebRTC 信令（内网直连模式）
+	RTCWebRTC *bool   `json:"rtc_webrtc,omitempty"` // 前端告知支持 WebRTC
+	RTCSDP    *string `json:"rtc_sdp,omitempty"`    // SDP Offer/Answer
+	RTCIce    *string `json:"rtc_ice,omitempty"`    // ICE Candidate (JSON)
 }
 
 // statsMsg 定义性能统计消息，每秒由后端推送到前端用于状态栏展示
@@ -814,6 +818,7 @@ func main() {
 		detectFFmpeg() // 自动检测或下载 ffmpeg
 	}
 	detectH264Encoder() // 按 GPU 品牌选择最优 H.264 编码器
+	initWebRTC()        // 初始化 WebRTC（全局视频轨 + 信令管理）
 
 	// ── 静态文件服务（嵌入的 HTML/JS/CSS）──
 	sub, _ := fs.Sub(staticFS, "static")

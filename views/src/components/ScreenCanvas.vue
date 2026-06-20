@@ -5,8 +5,9 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch } from 'vue';
 import { useAppStore } from '@/stores/app';
-import { registerBinaryHandler } from '@/composables/useWebSocket';
+import { registerBinaryHandler, registerWebRTCSignalHandler } from '@/composables/useWebSocket';
 import { screenCoords } from '@/composables/useCoordinateMapping';
+import { startWebRTC, type WebRTCControl } from '@/composables/useWebRTC';
 
 import { createH264Decoder, type H264Decoder } from '@/decoders/h264';
 import { createJpegDecoder, type JpegDecoder } from '@/decoders/jpeg';
@@ -16,6 +17,9 @@ const canvasRef = ref<HTMLCanvasElement | null>(null);
 
 let h264Decoder: ReturnType<typeof createH264Decoder> | null = null;
 let jpegDecoder: ReturnType<typeof createJpegDecoder> | null = null;
+
+// ── WebRTC 会话 ──
+let webrtc: WebRTCControl | null = null;
 
 // ── 桌面端输入状态 ──
 let active = false;
@@ -248,6 +252,29 @@ function unbindDesktopEvents() {
 // 生命周期
 // ═══════════════════════════════════════════
 
+/** 启动 WebRTC（仅在 WS 已连接、H.264 可用且尚未创建会话时） */
+function tryStartWebRTC() {
+  if (!store.canH264) return;
+  if (!canvasRef.value) return;
+  if (webrtc) return; // 已创建则跳过
+
+  console.log('[WebRTC] 初始化连接...');
+  webrtc = startWebRTC(
+    canvasRef.value,
+    (msg) => store.send(msg),
+    () => {
+      store.webrtcActive = true;
+      console.log('[WebRTC] 视频轨已连接');
+      if (store.connectionStatus === 'switching') {
+        store.connectionStatus = 'connected';
+      }
+    },
+  );
+  registerWebRTCSignalHandler((msg) => webrtc?.onSignal(msg));
+  // 信令处理器就绪后，告知后端启动 WebRTC
+  store.send({ rtc_webrtc: true });
+}
+
 onMounted(() => {
   initDecoders();
   registerBinaryHandler(handleBinary);
@@ -255,17 +282,47 @@ onMounted(() => {
   if (!store.isMobile) {
     bindDesktopEvents();
   }
+
+  // 连接就绪时启动 WebRTC（可能已连接，也可能稍后连接）
+  if (store.connectionStatus === 'connected') {
+    tryStartWebRTC();
+  }
 });
 
-// 格式变化时重置解码器
-watch(() => store.streamFormat, () => {
+// WS 连接成功 → 尝试启动 WebRTC
+watch(() => store.connectionStatus, (status) => {
+  if (status === 'connected') {
+    tryStartWebRTC();
+  }
+  if (status === 'disconnected' || status === 'failed') {
+    // 连接断开时清理 WebRTC 会话（下次重连会重新创建）
+    if (webrtc) {
+      webrtc.close();
+      webrtc = null;
+      store.webrtcActive = false;
+    }
+  }
+});
+
+// 格式变化时重置解码器；MJPEG 模式下关闭 WebRTC
+watch(() => store.streamFormat, (fmt) => {
   resetDecoders();
+  if (fmt === 'jpeg' && webrtc) {
+    console.log('[WebRTC] MJPEG 模式，关闭 WebRTC');
+    webrtc.close();
+    webrtc = null;
+    store.webrtcActive = false;
+  }
 });
 
 onUnmounted(() => {
   unbindDesktopEvents();
   closeDecoders();
+  webrtc?.close();
+  webrtc = null;
+  store.webrtcActive = false;
   registerBinaryHandler(() => {});
+  registerWebRTCSignalHandler(() => {});
 });
 </script>
 

@@ -75,6 +75,9 @@ export const useAppStore = defineStore('app', () => {
   /** 是否有 H.264 解码能力 */
   const canH264 = computed(() => typeof VideoDecoder !== 'undefined');
 
+  /** WebRTC 视频轨是否已连接（活跃时跳过 WebSocket 二进制帧） */
+  const webrtcActive = ref(false);
+
   // ═══════════════════════════════════════════
   // 操作
   // ═══════════════════════════════════════════
@@ -134,7 +137,7 @@ export const useAppStore = defineStore('app', () => {
     screenCount, origPw, origPh, meta,
     statsUser, statsFps, statsEncMs, statsKb, statsW, statsH, statsQ,
     statsOwner, statsMaxRate, statsUsers,
-    mobileResOpts, mobileUIBuilt, lastResKey, isMobile,
+    mobileResOpts, mobileUIBuilt, lastResKey, isMobile, webrtcActive,
     controlStatus, controlMsg, remoteClipboard, pendingClipboardPaste,
     // 计算属性
     basePw, basePh, serverAddr, canH264,

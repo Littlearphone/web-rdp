@@ -38,6 +38,8 @@ type ffSession struct {
 	subs       map[int]chan []byte // 订阅者通道
 	nextID     int
 	sentFrames bool // h264Reader 是否成功发送过帧（用于判断编码器真实可用性）
+	display    int  // 显示器 ID（供 fan-out goroutine 写入 WebRTC 轨时使用）
+	isH264     bool // 当前是否为 H.264 编码（供 fan-out goroutine 判断是否写 WebRTC）
 }
 
 // subscribe 注册订阅者，返回 (订阅ID, 独立帧通道)。
@@ -250,6 +252,8 @@ func startFFmpeg(id, quality, maxW, fps int, h264 bool) *ffSession {
 		stopCh:     make(chan struct{}),
 		stderrBuf:  new(bytes.Buffer),
 		stderrDone: make(chan struct{}),
+		display:    id,
+		isH264:     h264,
 	}
 	// 异步读取 stderr 用于诊断
 	go func() {
@@ -305,6 +309,10 @@ func startFFmpeg(id, quality, maxW, fps int, h264 bool) *ffSession {
 				}
 			}
 			ff.subsMu.Unlock()
+			// WebRTC 路径：H.264 帧额外写入全局视频轨（非阻塞，静默丢弃）
+			if frame != nil && ff.isH264 {
+				writeWebRTCSample(frame)
+			}
 		}
 		// frameCh 关闭 → 关闭所有订阅通道
 		ff.subsMu.Lock()

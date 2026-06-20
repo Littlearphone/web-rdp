@@ -7,6 +7,7 @@
  */
 
 import { useAppStore } from '@/stores/app';
+import { isWebRTCConnected, type WebRTCControl } from '@/composables/useWebRTC';
 import type { InitMsg, StatsMsg, ControlStatusMsg, StreamFormat } from '@/types';
 
 type BinaryHandler = (data: ArrayBuffer, format: 'h264' | 'jpeg') => void;
@@ -16,6 +17,14 @@ let binaryHandler: BinaryHandler | null = null;
 /** 注册二进制帧处理器（ScreenCanvas 调用） */
 export function registerBinaryHandler(fn: BinaryHandler) {
   binaryHandler = fn;
+}
+
+// ── WebRTC 信令转发 ──
+let webRTCSignalHandler: ((msg: Record<string, unknown>) => void) | null = null;
+
+/** 注册 WebRTC 信令处理器（ScreenCanvas 调用） */
+export function registerWebRTCSignalHandler(fn: (msg: Record<string, unknown>) => void) {
+  webRTCSignalHandler = fn;
 }
 
 /** SHA-256 摘要（用于认证 challenge-response） */
@@ -70,6 +79,12 @@ export function useWebSocket() {
     if (typeof event.data === 'string') {
       try {
         const s = JSON.parse(event.data) as InitMsg & StatsMsg & ControlStatusMsg;
+
+        // ── WebRTC 信令转发 ──
+        if ((s.rtc_sdp || s.rtc_ice) && webRTCSignalHandler) {
+          webRTCSignalHandler(s as unknown as Record<string, unknown>);
+          return;
+        }
 
         // 剪贴板推送（后端 → 前端）
         if (s.clipboard) {
@@ -152,7 +167,8 @@ export function useWebSocket() {
     }
 
     // 二进制帧 → 委托给 ScreenCanvas 注册的 handler
-    if (binaryHandler) {
+    // WebRTC 活跃时跳过 WebSocket 帧（避免双路重复渲染）
+    if (binaryHandler && !isWebRTCConnected()) {
       binaryHandler(event.data as ArrayBuffer, store.streamFormat);
     }
   }

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-Web 远程桌面控制（web-rdp）—— 通过浏览器远程控制 Windows 桌面。Go 后端捕获屏幕并通过 WebSocket 实时推流，Vue 3 前端解码渲染并捕获用户输入回传。
+Web 远程桌面控制（web-rdp）—— 通过浏览器远程控制 Windows 桌面。Go 后端捕获屏幕，**优先通过 WebRTC (UDP/RTP) 推流，WebSocket (TCP) 作为信令通道和视频回退**。Vue 3 前端解码渲染并捕获用户输入回传。
 
 **核心能力：** 屏幕查看 + 输入转发（键盘/鼠标/触控）+ 双向文本剪贴板同步。无文件传输、无音频传输。
 
@@ -30,9 +30,10 @@ web-rdp.exe -proxy :7890         # 通过代理下载 ffmpeg
 
 | 层 | 技术 |
 |---|---|
-| 后端 | Go 1.26, `gorilla/websocket`, Win32 syscall API |
-| 前端 | Vue 3 + TypeScript + Pinia + Naive UI, Vite 8 |
+| 后端 | Go 1.26, `gorilla/websocket`, `pion/webrtc/v4`, Win32 syscall API |
+| 前端 | Vue 3 + TypeScript + Pinia + Naive UI, Vite 8, RTCPeerConnection API |
 | 编码 | ffmpeg (H.264 NVENC/AMF/QSV/libx264, MJPEG), WebCodecs API |
+| 传输 | **WebRTC (UDP/RTP 优先)** + WebSocket (TCP/信令/回退)，内网直连无 STUN/TURN |
 | 部署 | 单一 exe，前端静态文件通过 `//go:embed static` 内嵌 |
 
 ## 架构
@@ -41,9 +42,10 @@ web-rdp.exe -proxy :7890         # 通过代理下载 ffmpeg
 
 ```
 main.go              HTTP/WS 服务入口 + CLI 标志 + Win32 控制 API（输入模拟、控制权管理）
-ws.go                WebSocket 连接生命周期 + 帧处理主循环 + 编码格式切换 + 用户管理
+ws.go                WebSocket 连接生命周期 + 帧处理主循环 + 编码格式切换 + 用户管理 + WebRTC 信令路由
+webrtc.go            WebRTC 全局视频轨 + PeerConnection 生命周期 + SDP/ICE 信令管理（pion/webrtc v4）
 permission.go        控制权限管理 + 深色 Win32 弹窗（权限请求/控制中），runtime.LockOSThread()
-ffmpeg_pipeline.go   ffmpeg 进程池（引用计数）+ H.264 Annex B / MJPEG 读写器 + Fan-out 分发
+ffmpeg_pipeline.go   ffmpeg 进程池（引用计数）+ H.264 Annex B / MJPEG 读写器 + Fan-out 分发（含 WebRTC 路径）
 ffmpeg_install.go    ffmpeg 自动检测/下载、GPU 供应商检测、编码器优先级排序与回退链
 screen.go            DPI 缩放缓存、帧二进制打包（24B 头部）、纯 Go 截图回退（双线性降采样）
 display_windows.go   多显示器刷新率检测（EnumDisplaySettingsW → dmDisplayFrequency）
@@ -64,6 +66,11 @@ display_windows.go   多显示器刷新率检测（EnumDisplaySettingsW → dmDi
 | 后端→前端 | JSON | `{format, quality, maxw, fps}` | 格式切换通知（初始连接或 ffmpeg 重启时） |
 | 后端→前端 | JSON (每秒) | `{fps, enc_ms, kb, owner, q, w, h, ox, oy, zoom, screens, maxrate, users}` | 性能统计 |
 | 后端→前端 | JSON | `{control_status, control_msg}` | 控制状态变更：granted/denied/busy/pending |
+| 前端→后端 | JSON | `{rtc_webrtc: true}` | 告知支持 WebRTC，触发后端创建 PeerConnection（仅 H.264 模式） |
+| 后端→前端 | JSON | `{rtc_sdp: "<offer>"}` | WebRTC SDP Offer（后端创建 PeerConnection 后发出） |
+| 前端→后端 | JSON | `{rtc_sdp: "<answer>"}` | WebRTC SDP Answer（前端 SetRemoteDescription 后返回） |
+| 双向 | JSON | `{rtc_ice: {...}}` | WebRTC ICE Candidate 交换（自动双向） |
+| 后端→前端 | RTP/UDP | H.264 Annex B | WebRTC 视频轨（仅 H.264，UDP 直连，不经过 WebSocket 信道） |
 
 ### ffmpeg 会话池（核心）
 
@@ -75,7 +82,7 @@ ffRefs[displayID] → int（引用计数，所有用户断开时停进程）
 - `acquireFFmpeg`：获取或创建会话（参数匹配则复用，否则用池中现有参数）
 - `restartFFmpeg`：**仅控制者**调用，停止旧会话并用新参数重建。**必须在调用前通过 releaseFFmpeg 释放自己的引用**，且必须保留其他订阅者的引用计数迁移到新会话
 - `releaseFFmpeg`：减引用，至 0 时停止进程并清理
-- Fan-out goroutine：将 `frameCh` 的每帧复制给所有订阅者独立通道，解决多用户共享时 Go channel 单消费者问题
+- Fan-out goroutine：将 `frameCh` 的每帧复制给所有订阅者独立通道（WebSocket 路径），同时 H.264 帧写入全局 WebRTC Track（`writeWebRTCSample`，非阻塞丢弃）。双路并行，前端 WebRTC 活跃时跳过 WS 帧避免重复渲染
 - 池参数（`ffPoolQ/MW/FPS/H264`）在 `acquireFFmpeg` 后同步回调用方的 atomic 变量，确保非控制者的本地追踪变量与池一致
 - 支持 `ddagrab`（DXGI 零拷贝桌面捕获）和 `gdigrab`（传统 GDI）两种捕获模式
 - 像素率限制：每显示器 700M 像素/秒上限，防止编码器积压
@@ -105,7 +112,8 @@ ScreenCanvas.vue                Canvas 渲染 + 鼠标事件 + H.264/JPEG 解码
 StatsDisplay.vue                移动端最小化统计（用户名/fps/KB）
 ConnectionOverlay.vue           断线重连覆盖层（倒计时 + "立即重连"按钮）
 
-composables/useWebSocket.ts     WS 连接管理，指数退避重连（5s→10s→20s→最大30s）
+composables/useWebSocket.ts     WS 连接管理 + WebRTC 信令转发，指数退避重连（5s→10s→20s→最大30s）
+composables/useWebRTC.ts        WebRTC 接收端：RTCPeerConnection + hidden video 元素解码 + rAF 绘制到 canvas
 composables/useKeyboardCapture.ts  全局键盘捕获，跟踪按下键，失焦/断连时释放所有键，拦截浏览器快捷键
 composables/useCoordinateMapping.ts  浏览器像素→远程桌面物理坐标映射（letterbox/pillarbox + DPI）
 composables/useResolutionOptions.ts  分辨率选项构建（原始→1080p→720p→480p），FPS选项
@@ -117,7 +125,9 @@ types/index.ts                  TypeScript 类型定义
 
 ### 关键数据流
 
-- **帧渲染**：`useWebSocket.registerBinaryHandler` → `ScreenCanvas.handleBinary` → `h264Decoder.feed` / `jpegDecoder.feed` → rAF 绘制到 canvas
+- **WebRTC 视频（优先）**：后端 fan-out → `writeWebRTCSample()` → pion TrackLocalStaticSample → RTP/UDP → 前端 `RTCPeerConnection.ontrack` → hidden `<video>` 解码 → rAF `ctx.drawImage` 绘制到 canvas
+- **WebSocket 视频（回退）**：`useWebSocket.registerBinaryHandler` → `ScreenCanvas.handleBinary` → `h264Decoder.feed` / `jpegDecoder.feed` → rAF 绘制到 canvas。WebRTC 活跃时跳过此路径（`isWebRTCConnected()` 检查）
+- **WebRTC 信令**：前端 `watch connectionStatus→connected` → `tryStartWebRTC()` → 发送 `{rtc_webrtc: true}` → 后端创建 PeerConnection+Offer → SDP/ICE 通过 WebSocket JSON 交换 → 连接建立
 - **坐标映射**：`useCoordinateMapping.screenCoords` 将浏览器像素映射到远程桌面物理坐标，考虑 letterbox/pillarbox 黑边 + DPI 缩放（`meta.ox/oy/zoom`）
 - **Canvas 尺寸策略**：CSS `width/height: 100%` 保证画布始终填满容器，分辨率变更只影响画质/带宽，不改变显示尺寸
 - **流式拖拽**：LEFDOWN + 光标位置 → 持续光标移动（限频 30ms）→ LEFTUP + 最终位置
@@ -195,7 +205,8 @@ types/index.ts                  TypeScript 类型定义
 | 解码错误 | H.264: `decoder.error` 回调 + 关键帧保护；JPEG: `createImageBitmap` 静默捕获 |
 | 首帧保护 | 首个 `decode()` 必须为关键帧，跳过非关键帧直至收到关键帧 |
 | 键盘安全 | 失焦/隐藏/断连/剥夺控制权时自动释放所有已按下按键 |
-| 格式切换 | `resetDecoders()` 重建解码器，状态 `switching` 阻止渲染 |
+| 格式切换 | `resetDecoders()` 重建解码器，状态 `switching` 阻止渲染。MJPEG 模式自动关闭 WebRTC |
+| WebRTC 失败/断连 | `pc.onconnectionstatechange` → `failed/disconnected` 清理会话；前端 `watch connectionStatus` → 重连后重新创建 WebRTC。视频回退到 WebSocket 二进制帧（`isWebRTCConnected()` 为 false 时自动接管） |
 
 ## 重要约定
 
@@ -205,6 +216,11 @@ types/index.ts                  TypeScript 类型定义
 - `restartFFmpeg` 的调用者必须先 `ff.unsubscribe(subID)` + `releaseFFmpeg(curScreen)` 再调用
 - 非控制者进入 `acquireFFmpeg` 路径后，池同步代码会将 atomic 变量覆写为池中实际值（这是预期行为）
 - Win32 UI（权限弹窗）必须 `runtime.LockOSThread()` + 消息循环结束 `UnlockOSThread()`
+- **WebRTC 时序**：前端必须在 `connectionStatus === 'connected'` 后（或已在 connected 状态时）初始化 WebRTC，否则 `store.send()` 因 WS 未 OPEN 而静默丢弃 `{rtc_webrtc: true}`
+- **WebRTC 双路避让**：`useWebSocket.ts` 的二进制帧 handler 在 `isWebRTCConnected()` 为 true 时跳过——避免同一画面被 WebRTC 和 WS 双重渲染
+- **WebRTC 生命周期**：`ScreenCanvas` 的 `watch connectionStatus` 在 `disconnected/failed` 时自动 `webrtc.close()`；`watch streamFormat` 切换为 `jpeg` 时关闭 WebRTC（MJPEG 不适用 RTP）
+- **pion 全局视频轨**：单 `TrackLocalStaticSample` 供所有 PeerConnection 共享，所有显示器 H.264 帧写入同一轨。`WriteSample` 非阻塞，无订阅者时静默丢弃——禁止反压阻塞 ffmpeg
+- **后端信令在 `ws.go` 处理**：`ctrlMsg.RTCWebRTC/SDP/Ice` 在 read goroutine 中处理，ICE candidate 通过 `sendFn` 回调利用用户级 `outCh` 推送
 
 ## 待实现
 
@@ -212,11 +228,12 @@ types/index.ts                  TypeScript 类型定义
 
 - [x] **剪贴板同步**：双向文本 + 图像剪贴板同步。文本通过 `CF_UNICODETEXT` + JSON 消息同步；图像通过 `CF_DIB ↔ PNG` 转换 + base64 JSON 消息同步。前端 `onCopy` 使用同步 `e.clipboardData.getData()`（而非异步 `navigator.clipboard.readText()`）确保可靠性。前端 `onPaste` 支持 `ClipboardEvent.items` 中的 image/png 类型。
 - [x] **密码认证**：`-password` 参数，challenge-response (SHA-256) 认证。匿名用户（无密码）需宿主审批。待扩展：失败次数限制 + IP 冷却防暴力破解。
-- [ ] **音频传输**：后端 WASAPI Loopback 捕获系统音频 → ffmpeg Opus/AAC 编码 → 前端 Web Audio API 播放。与视频帧 PTS 时间戳对齐。
+- [x] **WebRTC 传输**：H.264 视频通过 WebRTC (UDP/RTP) 传输，WebSocket 保留为信令通道和 MJPEG/H.264 回退。后端 pion/webrtc v4 → `TrackLocalStaticSample` 全局视频轨，前端 `RTCPeerConnection` + hidden `<video>` 解码 + rAF 绘制。内网直连无 STUN/TURN。`writeWebRTCSample` 非阻塞，无订阅者时静默丢弃帧。格式切换至 MJPEG 或 WebRTC 连接失败时自动回退 WebSocket。
+- [ ] **音频传输**：后端 WASAPI Loopback 捕获系统音频 → ffmpeg Opus/AAC 编码 → 前端 Web Audio API 播放。与视频帧 PTS 时间戳对齐。WebRTC 可复用同一 PeerConnection 的音频轨。
 
 ### 体验提升（中优先级）
 
-- [ ] **动态码率自适应**：前端上报丢包率/延迟/解码队列深度，后端实时调整 CRF/CQ 值。或改为 `-b:v` + `-maxrate` + `-bufsize` 码率控制模式。
+- [~] **动态码率自适应**：WebRTC 内置 GCC 带宽估计（接收端 `RTCStatsReport.availableOutgoingBitrate` 可反馈调 CRF）。WebSocket 路径仍无动态调整。待完成：前端上报丢包率/延迟/解码队列深度 → 后端闭环调参。
 - [ ] **光标渲染同步**：后端 `GetCursorInfo` 捕获光标位置 + 形状 → 前端 CSS 绝对定位 canvas 叠加渲染本地光标，消除"光标在哪"的困惑。
 - [ ] **全屏模式**：`Element.requestFullscreen()` + `navigator.keyboard.lock()`，全屏时隐藏顶栏/侧边栏。
 - [ ] **HEVC/AV1 编码支持**：`hevc_nvenc`/`hevc_amf`/`hevc_qsv` 或 AV1，前端 `VideoDecoder.isConfigSupported()` 能力检测后协商编码格式。

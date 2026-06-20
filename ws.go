@@ -99,6 +99,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			releaseFFmpeg(curScreen)
 		}
 		releaseControl(userName)
+		removeRTCSession(userName) // 清理 WebRTC PeerConnection
 		closeActiveDialog()
 		_ = conn.Close()
 	}()
@@ -326,6 +327,40 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 						if err := setClipboardImage(pngData); err != nil {
 							log.Printf("剪贴板图像写入失败: %v", err)
 						}
+					}
+				}
+				// ── WebRTC 信令处理 ──
+				if cm.RTCWebRTC != nil && *cm.RTCWebRTC && webRTCEnabled() {
+					// 前端告知支持 WebRTC → 创建 PeerConnection + 生成 Offer
+					sendFn := func(data []byte) {
+						select {
+						case outCh <- wsMessage{websocket.TextMessage, data}:
+						default:
+						}
+					}
+					offer, err := createRTCSession(userName, sendFn)
+					if err != nil {
+						log.Printf("[%s] WebRTC 会话创建失败: %v", userName, err)
+					} else {
+						b, _ := json.Marshal(map[string]string{"rtc_sdp": offer})
+						if b != nil {
+							outCh <- wsMessage{websocket.TextMessage, b}
+						}
+						log.Printf("[%s] WebRTC Offer 已发送", userName)
+					}
+				}
+				if cm.RTCSDP != nil && *cm.RTCSDP != "" {
+					// 前端返回 SDP Answer
+					if err := handleRTCAnswer(userName, *cm.RTCSDP); err != nil {
+						log.Printf("[%s] WebRTC Answer 处理失败: %v", userName, err)
+					} else {
+						log.Printf("[%s] WebRTC Answer 已接收", userName)
+					}
+				}
+				if cm.RTCIce != nil && *cm.RTCIce != "" {
+					// 前端 ICE Candidate
+					if err := handleRTCICE(userName, *cm.RTCIce); err != nil {
+						log.Printf("[%s] ICE Candidate 处理失败: %v", userName, err)
 					}
 				}
 				continue

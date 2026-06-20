@@ -40,6 +40,10 @@ export interface CtrlMsg {
   clipboard?: string;
   clipboard_image?: string;
   auth?: string;
+  /** WebRTC 信令 */
+  rtc_webrtc?: boolean;
+  rtc_sdp?: string;
+  rtc_ice?: string;
 }
 
 /** 性能统计消息（后端每秒推送） */
@@ -69,6 +73,8 @@ export interface InitMsg {
   challenge?: string;
   clipboard?: string;
   clipboard_image?: string;
+  rtc_sdp?: string;
+  rtc_ice?: Record<string, unknown>;
 }
 
 /** 控制权限状态 */
