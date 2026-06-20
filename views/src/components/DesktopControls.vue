@@ -303,17 +303,18 @@ function toggleAdaptMode() {
   store.send({ adapt_mode: store.adaptMode });
 }
 
-// WebRTC 模式下自动拉满参数，让 GCC + 自适应全权接管。
-// 仅 WebRTC 触发的拉满，WS 模式保留用户手动控制。
-watch(() => store.webrtcActive, (active) => {
-  if (!active || store.streamFormat !== 'h264') return;
-  const maxFPS = store.statsMaxRate > 0 ? store.statsMaxRate : 60;
-  let changed = false;
-  if (store.currentQ !== 100) { store.currentQ = 100; changed = true; }
-  if (store.currentMW !== 0) { store.currentMW = 0; changed = true; }
-  if (store.currentFPS !== maxFPS) { store.currentFPS = maxFPS; changed = true; }
-  if (changed) store.sendSettings();
-});
+  // WebRTC 模式下自动拉满参数，让 GCC + 自适应全权接管。
+  // 仅 WebRTC 触发的拉满，WS 模式保留用户手动控制。
+  // fps 设为 0（自动检测）而非硬编码 maxRate：各显示器独立 auto-detect，
+  // 主屏 141Hz / 副屏 60Hz 各自正确，不会互相污染。
+  watch(() => store.webrtcActive, (active) => {
+    if (!active || store.streamFormat !== 'h264') return;
+    let changed = false;
+    if (store.currentQ !== 100) { store.currentQ = 100; changed = true; }
+    if (store.currentMW !== 0) { store.currentMW = 0; changed = true; }
+    if (store.currentFPS !== 0) { store.currentFPS = 0; changed = true; }
+    if (changed) store.sendSettings();
+  });
 
 const showEditNameDialog = ref(false);
 const editTempName = ref('');

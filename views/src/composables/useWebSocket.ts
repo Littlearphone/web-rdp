@@ -136,7 +136,10 @@ export function useWebSocket() {
           }
           if (s.quality !== undefined) store.currentQ = s.quality;
           if (s.maxw !== undefined) store.currentMW = s.maxw;
-          if (s.fps !== undefined && s.fps > 0) store.currentFPS = s.fps;
+          // 不同步 fps —— format 消息中的 fps 是自动检测后的实际编码值（如 141Hz），
+          // 直接写回 currentFPS 会被前端 ctrlMsg 当作用户设置回传给后端，
+          // 导致切换到副屏时跳过多显示器独立自动检测，锁死在主屏刷新率。
+          // 用户真实帧率偏好在 statsMsg 中通过 statsFps 独立显示。
           return;
         }
 

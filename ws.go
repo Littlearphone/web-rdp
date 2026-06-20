@@ -544,6 +544,9 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				subID, subCh = ff.subscribe()
 
 				// 对齐追踪变量到池中实际参数（加入已有会话时可能与用户默认值不同）
+				// 注意：不同步 currentFPS —— fps=0 表示"自动检测"，
+				// 主屏自动检测到的 180Hz 若写入 currentFPS 会变成硬编码值，
+				// 导致副屏切换时跳过多显示器独立自动检测，锁死在主屏的刷新率。
 				ffPoolMu.Lock()
 				if _, ok := ffPool[id]; ok {
 					ffQ = ffPoolQ[id]
@@ -552,7 +555,6 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 					ffH264 = ffPoolH264[id]
 					currentQuality.Store(int32(ffQ))
 					currentMaxW.Store(int32(ffMW))
-					currentFPS.Store(int32(ffFPS))
 					useH264.Store(ffH264)
 					// 同步局部变量，确保本迭代内格式消息携带正确值
 					q, mw, fps = ffQ, ffMW, ffFPS

@@ -246,7 +246,7 @@ func startFFmpeg(id, quality, maxW, fps int, h264 bool) *ffSession {
 	if useDDAGrab {
 		devName = "ddagrab"
 	}
-	log.Printf("ffmpeg: %s %dx%d @%dHz out=%dx%d", devName, physW, physH, refreshRate, outW, outH)
+	log.Printf("ffmpeg[%d]: %s %dx%d @%dHz (fps=%d) out=%dx%d", id, devName, physW, physH, refreshRate, fps, outW, outH)
 
 	ff := &ffSession{
 		cmd:        cmd,

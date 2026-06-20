@@ -24,7 +24,7 @@ export const useAppStore = defineStore('app', () => {
   // 用户设置
   // ═══════════════════════════════════════════
   const currentQ = ref(75);
-  const currentFPS = ref(60); // 默认 60fps，进页面不冲最高帧率
+  const currentFPS = ref(0); // 默认自动检测（各显示器独立），用户可选具体值
   const currentMW = ref(0);
   const currentScreen = ref(0);
 
