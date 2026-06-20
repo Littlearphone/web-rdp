@@ -1,0 +1,78 @@
+name: Build and Release
+
+permissions:
+  contents: write
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+    branches: [master]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 构建前端
+        run: |
+          cd views
+          npm ci
+          npm run build
+
+      - name: 构建后端 (exe)
+        run: |
+          go build -ldflags "-s -w" -o web-rdp.exe .
+
+      - name: 上传构建产物 (Artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-rdp
+          path: web-rdp.exe
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          name: web-rdp
+
+      - name: 计算 SHA256
+        run: sha256sum web-rdp.exe > web-rdp.exe.sha256
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body: |
+            ## 安装
+
+            下载 `web-rdp.exe`，双击运行即可。
+
+            > ⚠️ 本项目全部代码由生成式 AI 生成，未经人工审查。
+
+            ## SHA256
+            ```
+            ${{ github.ref_name }}
+            ```
+          files: |
+            web-rdp.exe
+            web-rdp.exe.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
