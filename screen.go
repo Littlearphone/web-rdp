@@ -20,7 +20,9 @@ var (
 
 // getScreenZoom 获取指定显示器的 DPI 缩放比。
 // 通过 EnumDisplayMonitors 获取逻辑分辨率，与 screenshot 物理分辨率对比计算出缩放因子。
-// 结果会被缓存，避免重复的 Windows API 调用。
+// 首次调用时枚举所有显示器并缓存，后续调用直接返回缓存值。
+// 注意：syscall.NewCallback 只能在包初始化或缓存未命中时调用一次，
+// 因为 Go 在 Windows 上限 2000 个 callback 且永不释放。
 func getScreenZoom(id int) float64 {
 	zoomCacheMu.RLock()
 	if z, ok := zoomCache[id]; ok {
@@ -28,25 +30,37 @@ func getScreenZoom(id int) float64 {
 		return z
 	}
 	zoomCacheMu.RUnlock()
-	var lw int32
+
+	// 未命中：枚举所有显示器，一次性填充缓存
+	zoomCacheMu.Lock()
+	// 双重检查，避免重复枚举
+	if z, ok := zoomCache[id]; ok {
+		zoomCacheMu.Unlock()
+		return z
+	}
 	idx := 0
 	cb := syscall.NewCallback(func(_ uintptr, _ uintptr, rc *RECT, _ uintptr) uintptr {
-		if idx == id {
-			lw = rc.Right - rc.Left
+		lw := rc.Right - rc.Left
+		b := screenshot.GetDisplayBounds(idx)
+		z := 1.0
+		if pw := b.Dx(); pw > 0 && lw > 0 {
+			z = float64(lw) / float64(pw)
 		}
+		zoomCache[idx] = z
 		idx++
 		return 1
 	})
 	_, _, _ = procEnumDisplayMonitors.Call(0, 0, cb, 0)
-	b := screenshot.GetDisplayBounds(id)
-	z := 1.0
-	if pw := b.Dx(); pw > 0 && lw > 0 {
-		z = float64(lw) / float64(pw)
-	}
-	zoomCacheMu.Lock()
-	zoomCache[id] = z
 	zoomCacheMu.Unlock()
-	return z
+
+	// 枚举完成后查缓存
+	zoomCacheMu.RLock()
+	z, ok := zoomCache[id]
+	zoomCacheMu.RUnlock()
+	if ok {
+		return z
+	}
+	return 1.0
 }
 
 // encodeFrame 将 MJPEG 帧数据与元数据打包为网络传输格式。
