@@ -115,7 +115,7 @@
 
     <!-- 动态数据 -->
     <span class="sep">|</span>
-    <span class="stat">{{ store.statsFps }}fps | {{ store.statsEncMs }}ms | {{ (store.statsKb * store.statsFps / 1024).toFixed(1) }}MB/s</span>
+    <span class="stat">{{ store.statsFps }}fps | max {{ store.statsEncMs }}ms | {{ bwText }}</span>
     <!-- 自适应状态指示（仅 H.264 模式） -->
     <span v-if="store.adaptActive && store.streamFormat === 'h264'" class="adapt-badge" :title="`自适应降级: 画质${store.adaptQ} FPS${store.adaptFPS}`">
       ↓{{ store.adaptQ }}q {{ store.adaptFPS }}fps
@@ -176,6 +176,13 @@ const isController = computed(() => store.statsOwner === store.statsUser);
 const isWebRTCSimplified = computed(() =>
   store.streamFormat === 'h264' && isController.value,
 );
+
+/** 带宽显示：自动选择 KB/s 或 MB/s */
+const bwText = computed(() => {
+  const kbps = store.statsKb * store.statsFps;
+  if (kbps >= 1000) return (kbps / 1024).toFixed(1) + 'MB/s';
+  return kbps.toFixed(0) + 'KB/s';
+});
 
 const screenOptions = computed(() => {
   const opts = [];
