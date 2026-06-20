@@ -362,12 +362,12 @@ func h264Args(useDDAGrab bool, id, refreshRate, cx, cy, cw, ch int, vf string, q
 	base = append(base, "-vf", vf)
 
 	// ── 画质映射：滑块 30-100 → 编码器 CQ/CRF 值（0-51，越小画质越高）──
-	//   100 → 28（曾为 25，降低极限画质避免编码器过载帧时间不可预测）
+	//   100 → 25（CQP 模式无 maxrate 约束，屏幕内容值得高画质）
 	//    75 → 35（默认中点）
 	//    30 → 48（最低画质）
 	var hq int
 	if quality >= 75 {
-		hq = 35 - (quality-75)*7/25
+		hq = 35 - (quality-75)*10/25
 	} else {
 		hq = 35 + (75-quality)*13/45
 	}
@@ -379,49 +379,24 @@ func h264Args(useDDAGrab bool, id, refreshRate, cx, cy, cw, ch int, vf string, q
 	}
 	hqs := strconv.Itoa(hq)
 
-	// ── 码率上限：基于像素率和画质的动态 maxrate ──
-	// 必须配合 bufsize 使用，否则 VBR/CRF 模式完全忽略 maxrate。
-	// bufsize = maxrate * 0.2s，够容纳大 IDR 帧（200-400KB），
-	// 但远低于秒级，不会引发多秒 VBV 缓冲延迟。
-	// 下限 2000k（250KB）确保 4K 分辨率下 IDR 帧不撑爆 VBV。
-	pxPerSec := cw * ch * refreshRate
-	bpp := 0.03 + float64(quality)*0.0012
-	if bpp > 0.10 {
-		bpp = 0.10 // 硬封 0.10 bpp，防高画质+高帧率下 maxrate 失控
-	}
-	maxBr := int(bpp * float64(pxPerSec) / 1_000_000)
-	if maxBr < 1 {
-		maxBr = 1
-	}
-	maxRateStr := strconv.Itoa(maxBr) + "M"
-	bufSize := maxBr * 100 // kbits，约 0.1 秒缓冲（曾为 0.2s，缩窄防突发）
-	if bufSize < 2000 {
-		bufSize = 2000 // 最低 250KB，确保大 IDR 帧能放进 VBV
-	}
-	if bufSize > 8000 {
-		bufSize = 8000 // 最高 1MB（曾为 2MB），收窄 VBV 上限
-	}
-	bufSizeStr := strconv.Itoa(bufSize) + "k"
-
 	enc := currentH264Encoder()
 	switch enc {
 	case "h264_nvenc":
-		// NVIDIA：p1=最快, ll=低延迟, vbr+cq+maxrate+bufsize, rc-lookahead=0 关闭前瞻
+		// NVIDIA：p1=最快, ll=低延迟, CQP 恒定画质
 		base = append(base, "-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ll",
-			"-rc", "vbr", "-cq", hqs, "-maxrate", maxRateStr, "-bufsize", bufSizeStr, "-rc-lookahead", "0", "-g", "60")
+			"-rc", "constqp", "-qp", hqs, "-g", "300")
 	case "h264_amf":
-		// AMD：speed=最快, cqp+bufsize 约束峰值
+		// AMD：speed=最快, CQP 恒定画质
 		base = append(base, "-c:v", "h264_amf", "-quality", "speed",
-			"-rc", "cqp", "-qp_p", hqs, "-qp_i", hqs, "-maxrate", maxRateStr, "-bufsize", bufSizeStr, "-g", "60")
+			"-rc", "cqp", "-qp_p", hqs, "-qp_i", hqs, "-g", "300")
 	case "h264_qsv":
-		// Intel：veryfast, look_ahead=0 减少延迟
+		// Intel：veryfast, CQP 恒定画质
 		base = append(base, "-c:v", "h264_qsv", "-preset", "veryfast", "-look_ahead", "0",
-			"-async_depth", "1", "-g", "60", "-global_quality", hqs, "-maxrate", maxRateStr, "-bufsize", bufSizeStr)
+			"-async_depth", "1", "-g", "300", "-rc", "cqp", "-qp", hqs)
 	case "libx264":
-		// CPU 回退：ultrafast+zerolatency+crf+maxrate+bufsize
+		// CPU 回退：ultrafast+zerolatency+CRF 恒定画质
 		base = append(base, "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-			"-crf", hqs, "-g", "60", "-x264opts", "slices=1:threads=1",
-			"-maxrate", maxRateStr, "-bufsize", bufSizeStr)
+			"-crf", hqs, "-g", "300", "-x264opts", "slices=1:threads=1")
 	default:
 		return nil
 	}
