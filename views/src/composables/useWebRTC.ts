@@ -26,6 +26,9 @@ let webrtcSession: {
   onFirstFrame: (() => void) | null;
 } | null = null;
 
+/** WebRTC 是否已渲染过至少一帧（用于 WS 帧交接门控） */
+let webrtcActive = false;
+
 export interface WebRTCControl {
   /** 处理来自 WebSocket 的信令消息（rtc_sdp / rtc_ice） */
   onSignal(msg: Record<string, unknown>): void;
@@ -76,6 +79,12 @@ export function startWebRTC(
   let hasNewFrame = false; // VFC 置 true，rAF 消费后置 false
   let lastDrawnTime = 0;   // video.currentTime 上次绘制值（VFC 不可用时用于去重）
 
+  // ── 诊断：记录渲染耗时（确认瓶颈后删除）──
+  let diagDrawSamples = 0;
+  let diagDrawTotal = 0;
+  let diagResizeTotal = 0;
+  let vfcTimestamp = 0; // VFC 触发时间，用于计算 VFC→rAF 延迟
+
   // 检测 requestVideoFrameCallback 支持
   const hasVFC = typeof (video as HTMLVideoElement & {
     requestVideoFrameCallback?: (cb: () => void) => number;
@@ -118,6 +127,7 @@ export function startWebRTC(
       // rAF 按显示器刷新率消费脏标记，多次 VFC 间只绘制最后一帧。
       const onVideoFrame = () => {
         hasNewFrame = true;
+        vfcTimestamp = performance.now();
         // 重新注册必须在本次回调内，确保下一帧也不漏
         vfcId = (video as HTMLVideoElement & {
           requestVideoFrameCallback: (cb: () => void) => number;
@@ -138,15 +148,30 @@ export function startWebRTC(
         const vh = video.videoHeight;
         if (vw === 0 || vh === 0) return;
 
+        const t0 = performance.now();
+        const vfcLag = vfcTimestamp > 0 ? t0 - vfcTimestamp : 0;
+
         if (canvas.width !== vw || canvas.height !== vh) {
+          const t1 = performance.now();
           canvas.width = vw;
           canvas.height = vh;
+          diagResizeTotal += performance.now() - t1;
         }
 
         ctx.drawImage(video, 0, 0);
+        const dt = performance.now() - t0;
+        diagDrawTotal += dt;
+        diagDrawSamples++;
+
+        if (dt > 10) console.warn('[WebRTC] 慢绘制:', dt.toFixed(1), 'ms canvas:', vw, 'x', vh, 'VFC→rAF:', vfcLag.toFixed(1), 'ms');
+        if (diagDrawSamples % 120 === 0) {
+          console.log('[WebRTC perf] draw:', diagDrawTotal.toFixed(1), 'ms resize:', diagResizeTotal.toFixed(1), 'ms (累计 120 帧)');
+          diagDrawTotal = 0; diagResizeTotal = 0;
+        }
 
         if (!firstFrameFired) {
           firstFrameFired = true;
+          webrtcActive = true;
           onFirstFrame?.();
         }
       };
@@ -168,15 +193,29 @@ export function startWebRTC(
         const vh = video.videoHeight;
         if (vw === 0 || vh === 0) return;
 
+        const t0 = performance.now();
+
         if (canvas.width !== vw || canvas.height !== vh) {
+          const t1 = performance.now();
           canvas.width = vw;
           canvas.height = vh;
+          diagResizeTotal += performance.now() - t1;
         }
 
         ctx.drawImage(video, 0, 0);
+        const dt = performance.now() - t0;
+        diagDrawTotal += dt;
+        diagDrawSamples++;
+
+        if (dt > 10) console.warn('[WebRTC] 慢绘制:', dt.toFixed(1), 'ms canvas:', vw, 'x', vh);
+        if (diagDrawSamples % 120 === 0) {
+          console.log('[WebRTC perf] draw:', diagDrawTotal.toFixed(1), 'ms resize:', diagResizeTotal.toFixed(1), 'ms (累计 120 帧)');
+          diagDrawTotal = 0; diagResizeTotal = 0;
+        }
 
         if (!firstFrameFired) {
           firstFrameFired = true;
+          webrtcActive = true;
           onFirstFrame?.();
         }
       };
@@ -240,6 +279,7 @@ export function startWebRTC(
   };
 
   function cleanup() {
+    webrtcActive = false;
     if (rafId) {
       cancelAnimationFrame(rafId);
       rafId = 0;
@@ -265,6 +305,11 @@ export function startWebRTC(
 export function isWebRTCConnected(): boolean {
   return webrtcSession !== null &&
     webrtcSession.pc.connectionState === 'connected';
+}
+
+/** WebRTC 是否已渲染过至少一帧（WS 帧交接的真正时机） */
+export function isWebRTCActive(): boolean {
+  return webrtcActive;
 }
 
 export interface WebRTCReceiveStats {

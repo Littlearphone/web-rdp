@@ -50,6 +50,7 @@ export function createH264Decoder(
       pendingFrame = null;
       if (!frame) return;
 
+      const t0 = DIAG ? performance.now() : 0;
       const pw = frame.displayWidth;
       const ph = frame.displayHeight;
       if (canvas.width !== pw || canvas.height !== ph) {
@@ -58,6 +59,12 @@ export function createH264Decoder(
       }
       ctx.drawImage(frame, 0, 0);
       frame.close();
+      if (DIAG) {
+        const dt = performance.now() - t0;
+        diagRender += dt;
+        if (dt > 10) console.warn('[H264] 慢渲染:', dt.toFixed(1), 'ms canvas:', canvas.width, 'x', canvas.height);
+        diagReport();
+      }
 
       if (!firstFrameFired) {
         firstFrameFired = true;
@@ -157,7 +164,7 @@ export function createH264Decoder(
     let pos = 0;
     let sps: Uint8Array | null = null;
     let pps: Uint8Array | null = null;
-    let firstIDR = -1;
+    let lastIDR = -1;
 
     while (pos < buf.length - 3) {
       const sc = findSC(buf, pos);
@@ -169,7 +176,8 @@ export function createH264Decoder(
       const t = nal[0] & 0x1F;
       if (t === 7) sps = nal;
       if (t === 8) pps = nal;
-      if (t === 5 && firstIDR < 0) firstIDR = sc;
+      // 记录最后一个 IDR 而非第一个：跳过积压的旧帧，立即显示最新画面
+      if (t === 5) lastIDR = sc;
       if (n < 0) break;
       pos = n;
     }
@@ -206,9 +214,10 @@ export function createH264Decoder(
     ts = 0;
     firstDecode = false;
 
-    // IDR 已在缓冲中 → 裁剪到 IDR 位置
-    if (firstIDR >= 0) {
-      buf = buf.slice(firstIDR);
+    // 裁剪到最后一个 IDR 位置，跳过积压的旧帧
+    // ffmpeg h264 格式会在 IDR 前重复 SPS/PPS，解码器可立即从该处开始
+    if (lastIDR >= 0) {
+      buf = buf.slice(lastIDR);
       firstDecode = false;
     }
     return true;
@@ -246,46 +255,73 @@ export function createH264Decoder(
     if (data.length < sl + 1 || !decoder) return;
     const t = data[sl] & 0x1F;
 
-    // ── 激进队列保护 ──
-    // 仅跳过 delta 帧不足以防止高分辨率下解码器队列无限增长 —
-    // IDR 帧（200-500KB）解码耗时远超 P 帧，GOP 内连续 IDR 可堆积数秒延迟。
-    // 队列 > 8 时 flush 解码器丢弃所有待解码帧，下一个 IDR 重建画面。
+    // ── 队列保护 ──
+    // IDR 帧（200-500KB）解码耗时远超 P 帧，队列堆积 → 延迟增加。
+    // 分层策略：中度堆积时跳过 delta 帧减压；严重堆积时 flush 清空队列。
+    // 阈值从 8→16 / 3→5 放宽，降低误触发导致等 IDR（GOP=300≈5s）的频率。
     const qs = decoder.decodeQueueSize;
-    if (qs > 8) {
+    if (qs > 16) {
       decoder.flush().catch(() => {});
       // flush 后解码器可能状态异常，标记等待下一个 IDR
       firstDecode = true;
       return;
     }
-    if (t !== 5 && qs > 3) return;
+    if (t !== 5 && qs > 5) return;
 
     try {
+      const t0 = DIAG ? performance.now() : 0;
       const avcc = annexbToAvcc(data);
       decoder.decode(new EncodedVideoChunk({
         type: t === 5 ? 'key' : 'delta',
         timestamp: ts++ * 33333,
         data: avcc,
       }));
+      if (DIAG) {
+        const dt = performance.now() - t0;
+        diagDecode += dt;
+        if (dt > 10) console.warn('[H264] 慢解码:', dt.toFixed(1), 'ms NAL_len:', data.length, 'type:', t);
+      }
     } catch (_) { /* 解码器关闭或状态异常 */ }
   }
 
-  // ── 数据入口 ──
-
-  /** 接收 WebSocket 二进制数据，送入解码流水线 */
-  function feed(raw: ArrayBuffer) {
-    const chunk = new Uint8Array(raw);
-    const t = new Uint8Array(buf.length + chunk.length);
-    t.set(buf);
-    t.set(chunk, buf.length);
-    buf = t;
-
-    // 解码器未就绪：尝试扫描 SPS/PPS
-    if (!ready) {
-      if (!init()) return;
+  // ── 诊断：记录各阶段耗时（确认瓶颈后删除）──
+  const DIAG = true;
+  let diagFeedCopy = 0;     // feed() 中 buf 拷贝耗时累计
+  let diagDecode = 0;       // decode() 中 annexbToAvcc + decoder.decode 耗时累计
+  let diagRender = 0;       // rAF output 回调中 drawImage + canvas resize 耗时累计
+  let diagSamples = 0;
+  function diagReport() {
+    if (!DIAG) return;
+    diagSamples++;
+    if (diagSamples % 120 === 0) { // 每~2秒(60fps)输出一次
+      console.log('[H264 perf] feedCopy:', diagFeedCopy.toFixed(1), 'ms',
+        'decode:', diagDecode.toFixed(1), 'ms',
+        'render:', diagRender.toFixed(1), 'ms',
+        '(累计 120 帧)');
+      diagFeedCopy = 0; diagDecode = 0; diagRender = 0;
     }
+  }
+  // 首次 init() 后缓冲区可能仍有大量积压 NAL，同步 while 循环一次性
+  // 处理上百帧会阻塞主线程，浏览器无法执行 rAF 和 decoder output 回调，
+  // 导致解码队列溢出 → flush → 等 IDR → 卡顿。分批 drain 每批处理少量
+  // NAL 后 setTimeout(0) 让出主线程，rAF 和 output 回调得以执行。
+  let drainScheduled = false;
 
-    // 循环提取并解码 NAL 单元
-    while (ready && buf.length > 3) {
+  /** 调度一次分批 drain（幂等，避免同时排多个 setTimeout） */
+  function scheduleDrain() {
+    if (drainScheduled) return;
+    drainScheduled = true;
+    setTimeout(() => {
+      drainScheduled = false;
+      drainBatch(20);
+    }, 0);
+  }
+
+  /** 从 buf 中提取并解码 NAL，每次最多处理 maxNals 个。
+   *  返回 true 表示 buf 中还有剩余数据待处理。 */
+  function drainBatch(maxNals: number): boolean {
+    let nalCount = 0;
+    while (ready && buf.length > 3 && nalCount < maxNals) {
       const sl = scLen(buf, 0);
 
       // 首帧保护：configure() 后首个 decode 必须是 keyframe
@@ -315,6 +351,52 @@ export function createH264Decoder(
       const c = buf.slice(0, sc);
       buf = buf.slice(sc);
       if (c.length > sl) decode(c);
+      nalCount++;
+    }
+    return ready && buf.length > 3;
+  }
+
+  // ── 数据入口 ──
+
+  /** 接收 WebSocket 二进制数据，送入解码流水线 */
+  function feed(raw: ArrayBuffer) {
+    const t0 = DIAG ? performance.now() : 0;
+    const chunk = new Uint8Array(raw);
+    const t = new Uint8Array(buf.length + chunk.length);
+    t.set(buf);
+    t.set(chunk, buf.length);
+    buf = t;
+    if (DIAG) {
+      const dt = performance.now() - t0;
+      diagFeedCopy += dt;
+      if (dt > 5) console.warn('[H264] 慢拷贝:', dt.toFixed(1), 'ms buf:', (buf.length/1024).toFixed(0), 'KB chunk:', raw.byteLength);
+    }
+
+    // 解码器未就绪：尝试扫描 SPS/PPS
+    if (!ready) {
+      // ── 缓冲区硬上限：防止初始化前帧无限积累 ──
+      // 高帧率（60-180fps）下积累数秒可达数十 MB，解码器就绪后同步
+      // 洪水式解码导致队列溢出 → flush → 等 IDR（~5s）→ 卡顿。
+      // 超过 4MB 时仅保留尾部 ~1MB，在起始码边界裁剪。
+      if (buf.length > 4 * 1024 * 1024) {
+        const cutoff = buf.length - 1024 * 1024;
+        const sc = findSC(buf, cutoff);
+        if (sc >= 0) {
+          buf = buf.slice(sc);
+        } else {
+          buf = buf.slice(cutoff);
+        }
+      }
+      if (!init()) return;
+      // init() 成功 → 启动分批 drain，避免同步 while 阻塞主线程
+      scheduleDrain();
+      return;
+    }
+
+    // 已就绪：直接 drain（缓冲区通常仅本帧数据，量小无需分批）
+    if (drainBatch(999)) {
+      // 如果还有剩余（不常见），调度继续 drain 避免积压
+      scheduleDrain();
     }
   }
 

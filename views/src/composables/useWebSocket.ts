@@ -7,7 +7,7 @@
  */
 
 import { useAppStore } from '@/stores/app';
-import { isWebRTCConnected, type WebRTCControl } from '@/composables/useWebRTC';
+import { isWebRTCActive, type WebRTCControl } from '@/composables/useWebRTC';
 import type { InitMsg, StatsMsg, ControlStatusMsg, StreamFormat } from '@/types';
 
 type BinaryHandler = (data: ArrayBuffer, format: 'h264' | 'jpeg') => void;
@@ -189,8 +189,8 @@ export function useWebSocket() {
     }
 
     // 二进制帧 → 委托给 ScreenCanvas 注册的 handler
-    // WebRTC 活跃时跳过 WebSocket 帧（避免双路重复渲染）
-    if (binaryHandler && !isWebRTCConnected()) {
+    // WebRTC 首帧渲染后才跳过 WS 帧（避免 ICE 连通→首帧到达间的空窗冻结）
+    if (binaryHandler && !isWebRTCActive()) {
       binaryHandler(event.data as ArrayBuffer, store.streamFormat);
     }
   }
