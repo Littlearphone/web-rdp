@@ -16,6 +16,8 @@ import (
 	"flag"
 	"fmt"
 	"image"
+	_ "image/gif"  // 注册 GIF 解码器（浏览器剪贴板可能存 GIF）
+	_ "image/jpeg" // 注册 JPEG 解码器（浏览器剪贴板常存 JPEG）
 	"image/png"
 	"io"
 	"io/fs"
@@ -351,11 +353,12 @@ func getClipboardImage() []byte {
 	return pngBytes
 }
 
-// setClipboardImage 将 PNG 图像数据写入 Windows 剪贴板（CF_DIB 格式）。
-func setClipboardImage(pngData []byte) error {
-	img, err := png.Decode(bytes.NewReader(pngData))
+// setClipboardImage 将图像数据（PNG/JPEG/GIF 等任意格式）写入 Windows 剪贴板（CF_DIB 格式）。
+// 使用 image.Decode 自动检测格式，浏览器传来的可能是 JPEG/PNG/WebP 等。
+func setClipboardImage(imgData []byte) error {
+	img, _, err := image.Decode(bytes.NewReader(imgData))
 	if err != nil {
-		return fmt.Errorf("PNG 解码失败: %w", err)
+		return fmt.Errorf("图片解码失败: %w", err)
 	}
 
 	dib, err := rgbaToDIB(img)

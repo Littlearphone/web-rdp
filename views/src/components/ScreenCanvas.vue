@@ -159,6 +159,17 @@ function onContextMenu(e: MouseEvent) {
   store.send({ rx: coords.fx, ry: coords.fy });
 }
 
+/** 将 ArrayBuffer 分块编码为 base64（避免大图导致调用栈溢出） */
+function arrayBufferToBase64(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  const CHUNK = 0x8000; // 32KB 分块
+  let result = '';
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    result += String.fromCharCode(...bytes.subarray(i, Math.min(i + CHUNK, bytes.length)));
+  }
+  return btoa(result);
+}
+
 /** 粘贴事件：将浏览器剪贴板内容（文本或图像）发送到远程 */
 async function onPaste(e: ClipboardEvent) {
   let sent = false;
@@ -168,10 +179,10 @@ async function onPaste(e: ClipboardEvent) {
     for (let i = 0; i < items.length; i++) {
       if (items[i].type.startsWith('image/')) {
         const blob = items[i].getAsFile();
-        if (blob) {
+        if (blob && blob.size < 5 * 1024 * 1024) { // 上限 5MB
           try {
             const buf = await blob.arrayBuffer();
-            const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+            const b64 = arrayBufferToBase64(buf);
             store.send({ clipboard_image: b64 });
             sent = true;
           } catch (_) { /* 读取失败 */ }

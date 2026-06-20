@@ -46,7 +46,7 @@ func (f *ffSession) subscribe() (int, <-chan []byte) {
 	defer f.subsMu.Unlock()
 	id := f.nextID
 	f.nextID++
-	ch := make(chan []byte, 4)
+	ch := make(chan []byte, 5)
 	if f.subs == nil {
 		f.subs = make(map[int]chan []byte)
 	}
@@ -264,7 +264,7 @@ func startFFmpeg(id, quality, maxW, fps int, h264 bool) *ffSession {
 	ff := &ffSession{
 		cmd:        cmd,
 		stdout:     bufio.NewReaderSize(stdout, 256*1024),
-		frameCh:    make(chan []byte, 5),
+		frameCh:    make(chan []byte, 6),
 		stopCh:     make(chan struct{}),
 		stderrBuf:  new(bytes.Buffer),
 		stderrDone: make(chan struct{}),
@@ -366,10 +366,10 @@ func h264Args(useDDAGrab bool, id, refreshRate, cx, cy, cw, ch int, vf string, q
 	}
 	base = append(base, "-vf", vf)
 
-	// 画质映射：滑块 30-100 → 编码器质量参数（0-51，值越小画质越高）
-	//   滑块 100 → 12（极致画质）
-	//   滑块  75 → 28（默认，与旧版硬编码值一致）
-	//   滑块  30 → 48（最低画质，节省流量）
+	// ── 画质映射：滑块 30-100 → 编码器 CQ/CRF 值（0-51，越小画质越高）──
+	//   100 → 12（极致画质）
+	//    75 → 28（默认）
+	//    30 → 48（最低画质）
 	var hq int
 	if quality >= 75 {
 		hq = 28 - (quality-75)*16/25
@@ -384,26 +384,38 @@ func h264Args(useDDAGrab bool, id, refreshRate, cx, cy, cw, ch int, vf string, q
 	}
 	hqs := strconv.Itoa(hq)
 
+	// ── 码率上限：基于像素率和画质的动态 maxrate ──
+	// 防止 CQ 模式在高画质时码率爆炸。不使用 bufsize —
+	// bufsize 配合 maxrate 会强制 VBV 约束，导致编码器在高动态场景
+	// 延迟帧以凑满 buffer，引发多秒级管线和解码器队列阻塞。
+	pxPerSec := cw * ch * refreshRate
+	bpp := 0.03 + float64(quality)*0.0012
+	maxBr := int(bpp * float64(pxPerSec) / 1_000_000)
+	if maxBr < 1 {
+		maxBr = 1
+	}
+	maxRateStr := strconv.Itoa(maxBr) + "M"
+
 	enc := currentH264Encoder()
 	switch enc {
 	case "h264_nvenc":
-		// NVIDIA GPU：p1=最快速度, ll=低延迟, vbr+cq=可变码率恒定质量
+		// NVIDIA：p1=最快, ll=低延迟, vbr+cq+maxrate(无bufsize)
 		base = append(base, "-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ll",
-			"-rc", "vbr", "-cq", hqs, "-g", "60")
+			"-rc", "vbr", "-cq", hqs, "-maxrate", maxRateStr, "-g", "120")
 	case "h264_amf":
-		// AMD GPU：speed=最快速度, cqp=恒定质量
+		// AMD：speed=最快, cqp+maxrate
 		base = append(base, "-c:v", "h264_amf", "-quality", "speed",
-			"-rc", "cqp", "-qp_p", hqs, "-qp_i", hqs, "-g", "60")
+			"-rc", "cqp", "-qp_p", hqs, "-qp_i", hqs, "-maxrate", maxRateStr, "-g", "120")
 	case "h264_qsv":
-		// Intel Quick Sync：look_ahead=0 关闭前瞻减少延迟
+		// Intel：veryfast, look_ahead=0 减少延迟
 		base = append(base, "-c:v", "h264_qsv", "-preset", "veryfast", "-look_ahead", "0",
-			"-async_depth", "1", "-g", "60", "-global_quality", hqs)
+			"-async_depth", "1", "-g", "120", "-global_quality", hqs, "-maxrate", maxRateStr)
 	case "libx264":
-		// CPU 软件编码回退：ultrafast + zerolatency + 单 slice
+		// CPU 回退：ultrafast+zerolatency+crf+maxrate
 		base = append(base, "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-			"-crf", hqs, "-g", "60", "-x264opts", "slices=1:threads=1")
+			"-crf", hqs, "-g", "120", "-x264opts", "slices=1:threads=1",
+			"-maxrate", maxRateStr)
 	default:
-		// 编码器列表已耗尽（currentH264Encoder() 返回 ""），无可用的 H.264 编码器
 		return nil
 	}
 	base = append(base, "-bsf:v", "h264_metadata=aud=insert", "-f", "h264", "-flush_packets", "1", "pipe:1")

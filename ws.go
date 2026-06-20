@@ -172,7 +172,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 	}
 
 	// ── 输出通道（提前创建，供 reader goroutine 发送状态消息）──
-	outCh := make(chan wsMessage, 6)
+	outCh := make(chan wsMessage, 7)
 
 	// 发送 goroutine（单写 WebSocket，单通道保证顺序）
 	go func() {
@@ -376,6 +376,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				clipMu.Lock()
 				lastClipSeq = seq
 				if text != "" && text != lastClipText {
+					// 文本变更 → 发送文本
 					lastClipText = text
 					lastClipImage = nil
 					clipMu.Unlock()
@@ -387,24 +388,28 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 					}
 					continue
 				}
-				clipMu.Unlock()
-
-				// 无文本变更，检查图像
-				img := getClipboardImage()
-				clipMu.Lock()
-				lastClipSeq = seq
-				if img != nil && !bytes.Equal(img, lastClipImage) {
-					lastClipImage = img
-					lastClipText = ""
+				// 仅当剪贴板无文本时才检查图像（避免频繁 OpenClipboard）
+				if text == "" {
 					clipMu.Unlock()
-					b64 := base64.StdEncoding.EncodeToString(img)
-					if b, _ := json.Marshal(map[string]string{"clipboard_image": b64}); b != nil {
-						select {
-						case outCh <- wsMessage{websocket.TextMessage, b}:
-						default:
+					img := getClipboardImage()
+					clipMu.Lock()
+					lastClipSeq = seq
+					if img != nil && !bytes.Equal(img, lastClipImage) {
+						lastClipImage = img
+						lastClipText = ""
+						clipMu.Unlock()
+						b64 := base64.StdEncoding.EncodeToString(img)
+						if b, _ := json.Marshal(map[string]string{"clipboard_image": b64}); b != nil {
+							select {
+							case outCh <- wsMessage{websocket.TextMessage, b}:
+							default:
+							}
 						}
+					} else {
+						clipMu.Unlock()
 					}
 				} else {
+					// 文本非空且未变更 → 无需任何操作
 					clipMu.Unlock()
 				}
 			}
@@ -548,7 +553,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 					int32(cachedBounds.Dx()), int32(cachedBounds.Dy()), cachedZoom, data)
 			}
 			if ffH264 {
-				// 非阻塞发送。IDR 丢失仅短暂花屏（GOP=60 下约 0.4s），
+				// 非阻塞发送。IDR 丢失仅短暂花屏（GOP=120 下约 0.85s），
 				// 远好过硬背压造成多秒管道卡死。
 				select {
 				case outCh <- wsMessage{websocket.BinaryMessage, data}:

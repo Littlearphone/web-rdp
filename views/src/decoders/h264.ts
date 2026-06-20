@@ -244,9 +244,18 @@ export function createH264Decoder(
     if (data.length < sl + 1 || !decoder) return;
     const t = data[sl] & 0x1F;
 
-    // 队列保护：delta 帧在队列过长时跳过，防止解码延迟累积。
-    // key 帧（IDR）永不跳过 — 它是解码器恢复同步的锚点。
-    if (t !== 5 && decoder.decodeQueueSize > 3) return;
+    // ── 激进队列保护 ──
+    // 仅跳过 delta 帧不足以防止高分辨率下解码器队列无限增长 —
+    // IDR 帧（200-500KB）解码耗时远超 P 帧，GOP 内连续 IDR 可堆积数秒延迟。
+    // 队列 > 8 时 flush 解码器丢弃所有待解码帧，下一个 IDR 重建画面。
+    const qs = decoder.decodeQueueSize;
+    if (qs > 8) {
+      decoder.flush().catch(() => {});
+      // flush 后解码器可能状态异常，标记等待下一个 IDR
+      firstDecode = true;
+      return;
+    }
+    if (t !== 5 && qs > 3) return;
 
     try {
       const avcc = annexbToAvcc(data);
