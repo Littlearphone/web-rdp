@@ -88,6 +88,8 @@ export interface InitMsg {
   rtc_sdp?: string;
   rtc_ice?: Record<string, unknown>;
   rtc_restart?: boolean;
+  h264_sps?: string;
+  h264_pps?: string;
 }
 
 /** 控制权限状态 */

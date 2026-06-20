@@ -11,12 +11,19 @@ import { isWebRTCActive, type WebRTCControl } from '@/composables/useWebRTC';
 import type { InitMsg, StatsMsg, ControlStatusMsg, StreamFormat } from '@/types';
 
 type BinaryHandler = (data: ArrayBuffer, format: 'h264' | 'jpeg') => void;
+type SPSPPSHandler = (spsB64: string, ppsB64: string) => void;
 
 let binaryHandler: BinaryHandler | null = null;
+let spsPpsHandler: SPSPPSHandler | null = null;
 
 /** 注册二进制帧处理器（ScreenCanvas 调用） */
 export function registerBinaryHandler(fn: BinaryHandler) {
   binaryHandler = fn;
+}
+
+/** 注册 SPS/PPS 处理器（ScreenCanvas 调用，后端 JSON 推送后提前配置解码器） */
+export function registerSPSPPSHandler(fn: SPSPPSHandler) {
+  spsPpsHandler = fn;
 }
 
 // ── WebRTC 信令转发 ──
@@ -87,6 +94,12 @@ export function useWebSocket() {
     if (typeof event.data === 'string') {
       try {
         const s = JSON.parse(event.data) as InitMsg & StatsMsg & ControlStatusMsg;
+
+        // ── H.264 解码器预热：后端抢在二进制帧前推送 SPS/PPS ──
+        if (s.h264_sps && s.h264_pps && spsPpsHandler) {
+          spsPpsHandler(s.h264_sps, s.h264_pps);
+          return;
+        }
 
         // ── WebRTC 信令转发 ──
         if ((s.rtc_sdp || s.rtc_ice) && webRTCSignalHandler) {

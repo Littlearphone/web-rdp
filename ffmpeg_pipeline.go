@@ -42,6 +42,11 @@ type ffSession struct {
 	display    int  // 显示器 ID（供 fan-out goroutine 写入 WebRTC 轨时使用）
 	isH264     bool // 当前是否为 H.264 编码（供 fan-out goroutine 判断是否写 WebRTC）
 	fps        int  // 实际捕获帧率（供 fan-out 计算 WebRTC RTP 时间戳间隔）
+
+	// 缓存的 SPS/PPS NAL（不含起始码），供新订阅者提前配置解码器
+	spsPpsMu sync.Mutex
+	spsNal   []byte
+	ppsNal   []byte
 }
 
 // subscribe 注册订阅者，返回 (订阅ID, 独立帧通道)。
@@ -160,7 +165,26 @@ func releaseFFmpeg(id int) {
 	}
 }
 
-// ═══════════════════════ 启动（公共） ═══════════════════════
+// getCachedSPSPPS 返回指定显示器 ffmpeg 会话缓存的 SPS/PPS NAL（不含起始码）。
+// 如果缓存尚未就绪（ffmpeg 刚启动），返回 nil, nil。
+func getCachedSPSPPS(displayID int) ([]byte, []byte) {
+	ffPoolMu.Lock()
+	s, ok := ffPool[displayID]
+	ffPoolMu.Unlock()
+	if !ok || !s.isH264 {
+		return nil, nil
+	}
+	s.spsPpsMu.Lock()
+	defer s.spsPpsMu.Unlock()
+	if s.spsNal == nil || s.ppsNal == nil {
+		return nil, nil
+	}
+	sps := make([]byte, len(s.spsNal))
+	pps := make([]byte, len(s.ppsNal))
+	copy(sps, s.spsNal)
+	copy(pps, s.ppsNal)
+	return sps, pps
+}
 
 func startFFmpeg(id, quality, maxW, fps int, h264 bool) *ffSession {
 	bounds := screenshot.GetDisplayBounds(id)
@@ -529,6 +553,26 @@ func h264Reader(ff *ffSession) {
 			if nal[firstLen]&0x1F == 9 {
 				flushBatch()
 			}
+
+			// 缓存 SPS/PPS（不含起始码），供新订阅者提前配置解码器
+			nalType := nal[firstLen] & 0x1F
+			if nalType == 7 {
+				ff.spsPpsMu.Lock()
+				if ff.spsNal == nil {
+					ff.spsNal = make([]byte, len(nal)-firstLen)
+					copy(ff.spsNal, nal[firstLen:])
+				}
+				ff.spsPpsMu.Unlock()
+			}
+			if nalType == 8 {
+				ff.spsPpsMu.Lock()
+				if ff.ppsNal == nil {
+					ff.ppsNal = make([]byte, len(nal)-firstLen)
+					copy(ff.ppsNal, nal[firstLen:])
+				}
+				ff.spsPpsMu.Unlock()
+			}
+
 			batch = append(batch, nal)
 
 			nalBuf = nalBuf[nextSC:]

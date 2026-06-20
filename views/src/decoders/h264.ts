@@ -21,6 +21,8 @@ export interface H264Decoder {
   close(): void;
   /** 返回 VideoDecoder.decodeQueueSize，无解码器时返回 0 */
   getQueueSize(): number;
+  /** 用后端推送的 SPS/PPS（base64）提前配置解码器，省掉 init() 扫描 */
+  preConfigure(spsB64: string, ppsB64: string): void;
 }
 
 export function createH264Decoder(
@@ -412,6 +414,44 @@ export function createH264Decoder(
     firstFrameFired = false;
   }
 
+  /** 用后端推送的 SPS/PPS（base64）提前配置解码器。
+   *  抢在二进制帧到达之前完成 configure()，省掉 init() 同步扫描延迟。
+   *  若解码器已就绪则跳过（重复调用幂等）。 */
+  function preConfigure(spsB64: string, ppsB64: string): void {
+    if (ready) return; // 已就绪，幂等
+
+    const sps = Uint8Array.from(atob(spsB64), c => c.charCodeAt(0));
+    const pps = Uint8Array.from(atob(ppsB64), c => c.charCodeAt(0));
+
+    closeDecoder();
+
+    decoder = new VideoDecoder({
+      output: (frame: VideoFrame) => {
+        if (pendingFrame) {
+          pendingFrame.close();
+        }
+        pendingFrame = frame;
+        ensureRaf();
+      },
+      error: (e: Error) => console.error('H264 解码错误:', e.message),
+    });
+
+    try {
+      decoder.configure({
+        codec: buildCodecString(sps),
+        description: buildAvcC(sps, pps),
+      });
+    } catch (e) {
+      console.error('H264 preConfigure 失败:', (e as Error).message);
+      closeDecoder();
+      return;
+    }
+
+    ready = true;
+    ts = 0;
+    firstDecode = true; // 等第一个 IDR 到达才 decode
+  }
+
   /** 关闭解码器并释放资源 */
   function close() {
     cancelRaf();
@@ -424,5 +464,5 @@ export function createH264Decoder(
     return decoder?.decodeQueueSize ?? 0;
   }
 
-  return { feed, reset, close, getQueueSize };
+  return { feed, reset, close, getQueueSize, preConfigure };
 }

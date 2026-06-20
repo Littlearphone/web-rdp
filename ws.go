@@ -586,6 +586,29 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				}); b != nil {
 					outCh <- wsMessage{websocket.TextMessage, b}
 				}
+
+				// ── H.264 解码器预热：抢在二进制帧前推送 SPS/PPS ──
+				// h264Reader 异步产出首帧后缓存 SPS/PPS；轮询获取后通过 JSON
+				// 发送给前端，前端可提前 configure() 解码器，省掉 init() 扫描延迟。
+				if ffH264 {
+					deadline := time.Now().Add(200 * time.Millisecond)
+					var sps, pps []byte
+					for time.Now().Before(deadline) {
+						sps, pps = getCachedSPSPPS(id)
+						if sps != nil && pps != nil {
+							break
+						}
+						time.Sleep(5 * time.Millisecond)
+					}
+					if sps != nil && pps != nil {
+						if b, _ := json.Marshal(map[string]string{
+							"h264_sps": base64.StdEncoding.EncodeToString(sps),
+							"h264_pps": base64.StdEncoding.EncodeToString(pps),
+						}); b != nil {
+							outCh <- wsMessage{websocket.TextMessage, b}
+						}
+					}
+				}
 			}
 
 			var data []byte

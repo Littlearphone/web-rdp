@@ -5,7 +5,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch } from 'vue';
 import { useAppStore } from '@/stores/app';
-import { registerBinaryHandler, registerWebRTCSignalHandler, registerWebRTCRestartHandler } from '@/composables/useWebSocket';
+import { registerBinaryHandler, registerWebRTCSignalHandler, registerWebRTCRestartHandler, registerSPSPPSHandler } from '@/composables/useWebSocket';
 import { screenCoords } from '@/composables/useCoordinateMapping';
 import { startWebRTC, pollWebRTCStats, type WebRTCControl } from '@/composables/useWebRTC';
 
@@ -313,6 +313,9 @@ function tryStartWebRTC() {
 onMounted(() => {
   initDecoders();
   registerBinaryHandler(handleBinary);
+  registerSPSPPSHandler((sps, pps) => {
+    h264Decoder?.preConfigure(sps, pps);
+  });
 
   if (!store.isMobile) {
     bindDesktopEvents();
