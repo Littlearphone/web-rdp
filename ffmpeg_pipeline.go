@@ -205,38 +205,13 @@ func startFFmpeg(id, quality, maxW, fps int, h264 bool) *ffSession {
 	// -vf 链只处理后续纯系统内存的格式转换，GPU 编码器可直接接受 bgra 帧。
 
 	refreshRate := 60
-	if useDDAGrab && fps > 0 {
-		// 手动指定帧率：不压上限，用户知道自己在干什么
+	if fps > 0 {
+		// 手动指定帧率：前端下拉框传明确值，不压上限
 		refreshRate = fps
 	} else {
-		if useDDAGrab {
-			if r := getDisplayRefreshRate(id); r > 0 {
-				refreshRate = r // ddagrab 自动检测屏幕刷新率
-			}
-		}
-		// 分辨率自适应帧率上限：自动模式下统一生效（ddagrab 和 gdigrab），
-		// 避免编码器帧积压。700M 像素/秒对 NVENC/Turing+ 安全，
-		// 4K 约 84fps，1440p 约 140fps。
-		const maxPPS = 700_000_000
-		if px := capW * capH; px > 0 {
-			if capFPS := maxPPS / px; refreshRate > capFPS {
-				refreshRate = capFPS
-			}
-		}
-		// H.264 自动模式上限 90fps：超高刷显示器（120Hz+）在
-		// 高分辨率下编码器可能跟不上采集速度，导致管道积压超时。
-		// 手动指定 fps 时不受此限制。
-		if h264 && refreshRate > 90 {
-			refreshRate = 90
-		}
-		// MJPEG: cap auto framerate at 60fps. JPEG has no inter-frame
-		// compression; higher rates waste bandwidth and overwhelm the client.
-		if !h264 && refreshRate > 60 {
-			refreshRate = 60
-		}
-		if refreshRate < 60 {
-			refreshRate = 60
-		}
+		// fps=0：未指定帧率（初始连接），默认 60fps
+		// 不再自动检测屏幕刷新率 — 前端已去掉"自动帧率"选项，
+		// 用户可从下拉框显式选择更高帧率（上限 min(屏幕刷新率, 144)）
 	}
 
 	var args []string

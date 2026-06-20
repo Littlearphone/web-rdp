@@ -48,13 +48,16 @@ export function basePh(ph: number): number {
   return store.origPh || ph;
 }
 
-/** 生成 FPS 选项（仅 ddagrab 模式可见） */
+/** 生成 FPS 选项（仅 ddagrab 模式可见）。
+ *  上限取屏幕刷新率或 144 的较低值，向下排列多档帧率。 */
 export function buildFPSOptions(maxRate: number): { label: string; value: number }[] {
-  const opts: { label: string; value: number }[] = [
-    { label: '自动帧率', value: 0 },
-  ];
-  for (const r of [maxRate, 120, 90, 60, 30, 15]) {
-    if (r < maxRate && r >= 15 && !opts.find(o => o.value === r)) {
+  const upper = Math.min(maxRate, 144);
+  const tiers = [upper, 120, 90, 60, 30, 15];
+  const seen = new Set<number>();
+  const opts: { label: string; value: number }[] = [];
+  for (const r of tiers) {
+    if (r <= upper && r >= 15 && !seen.has(r)) {
+      seen.add(r);
       opts.push({ label: `${r} fps`, value: r });
     }
   }

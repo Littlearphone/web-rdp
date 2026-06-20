@@ -121,7 +121,7 @@ export function useWebSocket() {
           }
           if (s.quality !== undefined) store.currentQ = s.quality;
           if (s.maxw !== undefined) store.currentMW = s.maxw;
-          if (s.fps !== undefined) store.currentFPS = s.fps;
+          if (s.fps !== undefined && s.fps > 0) store.currentFPS = s.fps;
           return;
         }
 
