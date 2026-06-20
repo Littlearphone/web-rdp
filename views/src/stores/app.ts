@@ -79,6 +79,22 @@ export const useAppStore = defineStore('app', () => {
   const webrtcActive = ref(false);
 
   // ═══════════════════════════════════════════
+  // 自适应码率状态
+  // ═══════════════════════════════════════════
+  /** 自适应是否正在降级（后端推送） */
+  const adaptActive = ref(false);
+  /** 自适应目标画质（后端推送） */
+  const adaptQ = ref(0);
+  /** 自适应目标帧率（后端推送） */
+  const adaptFPS = ref(0);
+  /** 用户偏好模式："quality"（偏好画质）| "smooth"（偏好流畅） */
+  const adaptMode = ref<'quality' | 'smooth'>('quality');
+  /** 前端实际接收帧率（用于上报） */
+  const netFPS = ref(0);
+  /** 前端解码队列深度最大值（用于上报） */
+  const netQueue = ref(0);
+
+  // ═══════════════════════════════════════════
   // 操作
   // ═══════════════════════════════════════════
 
@@ -141,6 +157,8 @@ export const useAppStore = defineStore('app', () => {
     controlStatus, controlMsg, remoteClipboard, pendingClipboardPaste,
     // 计算属性
     basePw, basePh, serverAddr, canH264,
+    // 自适应
+    adaptActive, adaptQ, adaptFPS, adaptMode, netFPS, netQueue,
     // 操作
     send, sendSettings, sendKey, updateOrigRes, clearReconnectTimer,
   };

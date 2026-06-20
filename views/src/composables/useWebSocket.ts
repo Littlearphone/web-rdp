@@ -150,6 +150,11 @@ export function useWebSocket() {
         store.statsMaxRate = s.maxrate || 0;
         if (s.users !== undefined) store.statsUsers = s.users;
 
+        // 自适应状态（后端推送）
+        if (s.adapt_active !== undefined) store.adaptActive = s.adapt_active;
+        if (s.adapt_q !== undefined) store.adaptQ = s.adapt_q;
+        if (s.adapt_fps !== undefined) store.adaptFPS = s.adapt_fps;
+
         if (s.owner !== undefined) {
           store.statsOwner = s.owner;
         }

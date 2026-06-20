@@ -44,28 +44,31 @@
 
     <!-- 画质 / 分辨率 / 编码 / 帧率：仅控制者可见 -->
     <template v-if="isController">
-      <span class="sep">|</span>
+      <!-- WebRTC 模式下隐藏画质/分辨率/FPS，自动拉满 -->
+      <template v-if="!isWebRTCSimplified">
+        <span class="sep">|</span>
 
-      <span class="label">画质</span>
-      <n-slider
-        v-model:value="store.currentQ"
-        :min="30"
-        :max="100"
-        :step="5"
-        style="width:60px"
-        @update:value="store.sendSettings"
-      />
+        <span class="label">画质</span>
+        <n-slider
+          v-model:value="store.currentQ"
+          :min="30"
+          :max="100"
+          :step="5"
+          style="width:60px"
+          @update:value="store.sendSettings"
+        />
 
-      <span class="sep">|</span>
+        <span class="sep">|</span>
 
-      <span class="label">分辨率</span>
-      <n-select
-        v-model:value="store.currentMW"
-        :options="resOptions"
-        size="tiny"
-        style="width:90px"
-        @update:value="store.sendSettings"
-      />
+        <span class="label">分辨率</span>
+        <n-select
+          v-model:value="store.currentMW"
+          :options="resOptions"
+          size="tiny"
+          style="width:90px"
+          @update:value="store.sendSettings"
+        />
+      </template>
 
       <template v-if="store.canH264">
         <span class="sep">|</span>
@@ -83,7 +86,7 @@
         </n-tooltip>
       </template>
 
-      <template v-if="store.streamFormat === 'h264' && store.statsMaxRate > 0">
+      <template v-if="(store.streamFormat === 'h264' && store.statsMaxRate > 0) && !isWebRTCSimplified">
         <span class="sep">|</span>
 
         <n-select
@@ -94,11 +97,29 @@
           @update:value="onFPSChange"
         />
       </template>
+
+      <!-- 自适应偏好：仅 H.264 模式生效 -->
+      <template v-if="store.streamFormat === 'h264'">
+        <span class="sep">|</span>
+        <n-tooltip trigger="hover">
+          <template #trigger>
+            <span
+              class="adapt-mode-btn"
+              @click="toggleAdaptMode"
+            >当前为 {{ store.adaptMode === 'smooth' ? '⚡流畅' : '🎨画质' }} 模式</span>
+          </template>
+          单击切换：<br>🎨画质 → 优先降帧率保画质<br>⚡流畅 → 优先降画质保帧率
+        </n-tooltip>
+      </template>
     </template>
 
     <!-- 动态数据 -->
     <span class="sep">|</span>
     <span class="stat">{{ store.statsFps }}fps | {{ store.statsEncMs }}ms | {{ (store.statsKb * store.statsFps / 1024).toFixed(1) }}MB/s</span>
+    <!-- 自适应状态指示（仅 H.264 模式） -->
+    <span v-if="store.adaptActive && store.streamFormat === 'h264'" class="adapt-badge" :title="`自适应降级: 画质${store.adaptQ} FPS${store.adaptFPS}`">
+      ↓{{ store.adaptQ }}q {{ store.adaptFPS }}fps
+    </span>
     <span class="sep">|</span>
     <span class="stat">{{ store.statsUsers }} 人在线</span>
 
@@ -150,6 +171,11 @@ const notification = useNotification();
 
 /** 当前用户是否为控制者（仅控制者可见流配置项） */
 const isController = computed(() => store.statsOwner === store.statsUser);
+
+/** H.264 模式下简化 UI：隐藏画质/分辨率/FPS，参数拉满靠自适应 + GCC */
+const isWebRTCSimplified = computed(() =>
+  store.streamFormat === 'h264' && isController.value,
+);
 
 const screenOptions = computed(() => {
   const opts = [];
@@ -267,6 +293,23 @@ function onH264Toggle(v: boolean) {
   store.sendSettings();
 }
 
+function toggleAdaptMode() {
+  store.adaptMode = store.adaptMode === 'smooth' ? 'quality' : 'smooth';
+  store.send({ adapt_mode: store.adaptMode });
+}
+
+// H.264 模式下自动拉满参数，让 GCC + 自适应全权接管
+watch(() => store.streamFormat, (fmt) => {
+  if (fmt === 'h264' && isController.value) {
+    const maxFPS = store.statsMaxRate > 0 ? store.statsMaxRate : 60;
+    let changed = false;
+    if (store.currentQ !== 100) { store.currentQ = 100; changed = true; }
+    if (store.currentMW !== 0) { store.currentMW = 0; changed = true; }
+    if (store.currentFPS !== maxFPS) { store.currentFPS = maxFPS; changed = true; }
+    if (changed) store.sendSettings();
+  }
+});
+
 const showEditNameDialog = ref(false);
 const editTempName = ref('');
 const editNameInputRef = ref<InstanceType<typeof NInput> | null>(null);
@@ -358,5 +401,26 @@ function onStatusClick() {
   font-size: 12px;
   cursor: pointer;
   white-space: nowrap;
+}
+
+.adapt-mode-btn {
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  opacity: 0.8;
+  transition: opacity 0.2s;
+}
+.adapt-mode-btn:hover {
+  opacity: 1;
+}
+
+.adapt-badge {
+  font-size: 11px;
+  color: #e67e22;
+  background: rgba(230, 126, 34, 0.15);
+  border-radius: 3px;
+  padding: 1px 5px;
+  white-space: nowrap;
+  cursor: default;
 }
 </style>

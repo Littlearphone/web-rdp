@@ -222,6 +222,22 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				if cm.Fps != nil && *cm.Fps >= 0 {
 					currentFPS.Store(int32(*cm.Fps))
 				}
+				if cm.AdaptMode != nil && hasControl(userName) {
+					setAdaptConfig(int(currentQuality.Load()), int(currentFPS.Load()), int(currentMaxW.Load()), *cm.AdaptMode)
+				}
+				if cm.NetFPS != nil || cm.NetQueue != nil {
+					f := 0.0
+					q := 0
+					if cm.NetFPS != nil {
+						f = *cm.NetFPS
+					}
+					if cm.NetQueue != nil {
+						q = *cm.NetQueue
+					}
+					if hasControl(userName) {
+						feedNetworkStats(f, q)
+					}
+				}
 				if cm.Text != nil && *cm.Text != "" && hasControl(userName) {
 					doTypeText(*cm.Text)
 				}
@@ -460,6 +476,14 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 		}
 		q, mw, fps := int(currentQuality.Load()), int(currentMaxW.Load()), int(currentFPS.Load())
 
+		// 自适应码率：仅 H.264 模式生效（MJPEG 无此机制）
+		isCtrl := hasControl(userName)
+		if isCtrl && useH264.Load() {
+			if aq, afps, amw, active := adaptParams(q, fps, mw); active {
+				q, fps, mw = aq, afps, amw
+			}
+		}
+
 		if useFFmpeg {
 			// ── MJPEG → H.264 定期重试 ──
 			// 曾工作过的编码器仅因过载超时（非兼容性问题），
@@ -481,7 +505,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			// ── ffmpeg 路径 ──
 			h264 := useH264.Load()
 			paramsChanged := ffQ != q || ffMW != mw || ffFPS != fps || ffH264 != h264
-			isCtrl := hasControl(userName)
+			isCtrl = hasControl(userName)
 
 			// 仅控制者可因参数变化重启 ffmpeg；非控制者静默接受现有参数
 			if ff == nil || ffScreen != id || (paramsChanged && isCtrl) {
@@ -683,13 +707,17 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 						maxRate = 60
 					}
 				}
+				adaptActive, adaptQVal, adaptFpsVal := getAdaptStatus()
 				stat := statsMsg{
 					FPS: math.Round(fps*10) / 10, EncMs: math.Round(maxW*10) / 10,
 					KB: math.Round(float64(len(data))/102.4) / 10, Owner: controlOwner,
 					Ox: cachedBounds.Min.X, Oy: cachedBounds.Min.Y, Zoom: cachedZoom,
 					Q: q, W: cachedBounds.Dx(), H: cachedBounds.Dy(),
 					Screens: screenshot.NumActiveDisplays(), MaxRate: maxRate,
-					Users: int(connCount.Load()),
+					Users:       int(connCount.Load()),
+					AdaptActive: adaptActive,
+					AdaptQ:      adaptQVal,
+					AdaptFPS:    adaptFpsVal,
 				}
 				if b, _ := json.Marshal(stat); b != nil {
 					select {
@@ -747,13 +775,17 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 		if elapsed := time.Since(lastStats); elapsed >= time.Second {
 			fps := float64(frames) / elapsed.Seconds()
 			maxW := float64(maxWait.Microseconds()) / 1000
+			adaptActive, adaptQVal, adaptFpsVal := getAdaptStatus()
 			stat := statsMsg{
 				FPS: math.Round(fps*10) / 10, EncMs: math.Round(maxW*10) / 10,
 				KB: math.Round(float64(len(msg))/102.4) / 10, Owner: controlOwner,
 				Ox: cachedBounds.Min.X, Oy: cachedBounds.Min.Y, Zoom: cachedZoom,
 				Q: q, W: cachedBounds.Dx(), H: cachedBounds.Dy(),
 				Screens: screenshot.NumActiveDisplays(), MaxRate: 60,
-				Users: int(connCount.Load()),
+				Users:       int(connCount.Load()),
+				AdaptActive: adaptActive,
+				AdaptQ:      adaptQVal,
+				AdaptFPS:    adaptFpsVal,
 			}
 			if b, _ := json.Marshal(stat); b != nil {
 				select {

@@ -67,10 +67,31 @@ function closeDecoders() {
   jpegDecoder = null;
 }
 
+// ── 自适应码率：帧统计 ──
+let netFrameCount = 0;
+let netMaxQueue = 0;
+let netStatsTimer: ReturnType<typeof setInterval> | null = null;
+
+function reportNetStats() {
+  const fps = netFrameCount / 2; // 2 秒内的平均帧率
+  const queue = netMaxQueue;
+  netFrameCount = 0;
+  netMaxQueue = 0;
+  if (fps > 0 || queue > 0) {
+    store.netFPS = fps;
+    store.netQueue = queue;
+    store.send({ net_fps: Math.round(fps * 10) / 10, net_queue: queue });
+  }
+}
+
 /** 二进制帧路由 */
 function handleBinary(data: ArrayBuffer, format: 'h264' | 'jpeg') {
+  netFrameCount++;
   if (format === 'h264' && h264Decoder) {
     h264Decoder.feed(data);
+    // 跟踪解码队列深度（取两次上报间的最大值）
+    const qs = h264Decoder.getQueueSize();
+    if (qs > netMaxQueue) netMaxQueue = qs;
   } else if (format === 'jpeg' && jpegDecoder) {
     jpegDecoder.feed(data);
   }
@@ -255,6 +276,7 @@ function unbindDesktopEvents() {
 /** 启动 WebRTC（仅在 WS 已连接、H.264 可用且尚未创建会话时） */
 function tryStartWebRTC() {
   if (!store.canH264) return;
+  if (store.streamFormat !== 'h264') return; // JPEG 模式下不启动 WebRTC
   if (!canvasRef.value) return;
   if (webrtc) return; // 已创建则跳过
 
@@ -282,6 +304,9 @@ onMounted(() => {
   if (!store.isMobile) {
     bindDesktopEvents();
   }
+
+  // 自适应码率：每 2 秒上报网络统计
+  netStatsTimer = setInterval(reportNetStats, 2000);
 
   // 连接就绪时启动 WebRTC（可能已连接，也可能稍后连接）
   if (store.connectionStatus === 'connected') {
@@ -323,6 +348,10 @@ onUnmounted(() => {
   store.webrtcActive = false;
   registerBinaryHandler(() => {});
   registerWebRTCSignalHandler(() => {});
+  if (netStatsTimer) {
+    clearInterval(netStatsTimer);
+    netStatsTimer = null;
+  }
 });
 </script>
 

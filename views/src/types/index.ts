@@ -44,6 +44,12 @@ export interface CtrlMsg {
   rtc_webrtc?: boolean;
   rtc_sdp?: string;
   rtc_ice?: string;
+  /** 自适应码率：偏好模式 */
+  adapt_mode?: string;
+  /** 自适应码率：前端实际接收帧率 */
+  net_fps?: number;
+  /** 自适应码率：前端解码队列深度 */
+  net_queue?: number;
 }
 
 /** 性能统计消息（后端每秒推送） */
@@ -61,6 +67,12 @@ export interface StatsMsg {
   screens: number;
   maxrate: number;
   users?: number;
+  /** 自适应是否正在降级 */
+  adapt_active?: boolean;
+  /** 自适应目标画质 */
+  adapt_q?: number;
+  /** 自适应目标帧率 */
+  adapt_fps?: number;
 }
 
 /** 初始化 / 格式切换消息（用户名 + 编码格式 + 会话实际参数） */

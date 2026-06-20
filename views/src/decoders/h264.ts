@@ -19,6 +19,8 @@ export interface H264Decoder {
   feed(raw: ArrayBuffer): void;
   reset(): void;
   close(): void;
+  /** 返回 VideoDecoder.decodeQueueSize，无解码器时返回 0 */
+  getQueueSize(): number;
 }
 
 export function createH264Decoder(
@@ -335,5 +337,10 @@ export function createH264Decoder(
     closeDecoder();
   }
 
-  return { feed, reset, close };
+  /** 返回当前解码队列深度 */
+  function getQueueSize(): number {
+    return decoder?.decodeQueueSize ?? 0;
+  }
+
+  return { feed, reset, close, getQueueSize };
 }

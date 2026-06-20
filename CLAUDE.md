@@ -233,7 +233,7 @@ types/index.ts                  TypeScript 类型定义
 
 ### 体验提升（中优先级）
 
-- [~] **动态码率自适应**：WebRTC 内置 GCC 带宽估计（接收端 `RTCStatsReport.availableOutgoingBitrate` 可反馈调 CRF）。WebSocket 路径仍无动态调整。待完成：前端上报丢包率/延迟/解码队列深度 → 后端闭环调参。
+- [x] **动态码率自适应**：前端每 2 秒上报实际接收帧率 + 解码队列深度 → 后端 `adapt.go` 拥塞检测 → 在控制者偏好上限内自动降级画质/帧率/分辨率，恢复时逐级回升。两条策略：画质优先（先降帧率）和流畅优先（先降画质）。仅控制者网络反馈驱动自适应，5s 冷却防抖。WebRTC 路径 GCC 提供额外传输层调节。
 - [ ] **光标渲染同步**：后端 `GetCursorInfo` 捕获光标位置 + 形状 → 前端 CSS 绝对定位 canvas 叠加渲染本地光标，消除"光标在哪"的困惑。
 - [ ] **全屏模式**：`Element.requestFullscreen()` + `navigator.keyboard.lock()`，全屏时隐藏顶栏/侧边栏。
 - [ ] **HEVC/AV1 编码支持**：`hevc_nvenc`/`hevc_amf`/`hevc_qsv` 或 AV1，前端 `VideoDecoder.isConfigSupported()` 能力检测后协商编码格式。

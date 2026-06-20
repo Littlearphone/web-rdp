@@ -630,23 +630,30 @@ type ctrlMsg struct {
 	RTCWebRTC *bool   `json:"rtc_webrtc,omitempty"` // 前端告知支持 WebRTC
 	RTCSDP    *string `json:"rtc_sdp,omitempty"`    // SDP Offer/Answer
 	RTCIce    *string `json:"rtc_ice,omitempty"`    // ICE Candidate (JSON)
+	// 自适应码率（前端网络反馈）
+	AdaptMode *string  `json:"adapt_mode,omitempty"` // "quality" | "smooth"
+	NetFPS    *float64 `json:"net_fps,omitempty"`    // 前端实际接收帧率
+	NetQueue  *int     `json:"net_queue,omitempty"`  // 前端解码队列深度
 }
 
 // statsMsg 定义性能统计消息，每秒由后端推送到前端用于状态栏展示
 type statsMsg struct {
-	Owner   string  `json:"owner"`
-	FPS     float64 `json:"fps"`
-	EncMs   float64 `json:"enc_ms"`
-	KB      float64 `json:"kb"`
-	Q       int     `json:"q"`
-	W       int     `json:"w"`
-	H       int     `json:"h"`
-	Ox      int     `json:"ox"`
-	Oy      int     `json:"oy"`
-	Zoom    float64 `json:"zoom"`
-	Screens int     `json:"screens"`
-	MaxRate int     `json:"maxrate"` // 显示器刷新率上限（仅 ddagrab）
-	Users   int     `json:"users"`   // 当前在线连接数
+	Owner       string  `json:"owner"`
+	FPS         float64 `json:"fps"`
+	EncMs       float64 `json:"enc_ms"`
+	KB          float64 `json:"kb"`
+	Q           int     `json:"q"`
+	W           int     `json:"w"`
+	H           int     `json:"h"`
+	Ox          int     `json:"ox"`
+	Oy          int     `json:"oy"`
+	Zoom        float64 `json:"zoom"`
+	Screens     int     `json:"screens"`
+	MaxRate     int     `json:"maxrate"`      // 显示器刷新率上限（仅 ddagrab）
+	Users       int     `json:"users"`        // 当前在线连接数
+	AdaptActive bool    `json:"adapt_active"` // 自适应是否正在降级
+	AdaptQ      int     `json:"adapt_q"`      // 自适应目标画质
+	AdaptFPS    int     `json:"adapt_fps"`    // 自适应目标帧率
 }
 
 // main 是程序入口，负责解析命令行参数、初始化组件并启动 HTTP 服务器。
