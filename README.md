@@ -29,14 +29,14 @@
 
 - Windows 10/11
 - Go 1.26+
-- Node.js 20+（仅开发/构建前端时需要）
+- Node.js 22+（仅开发/构建前端时需要）
 - [ffmpeg](https://ffmpeg.org/)（可选，后端会自动检测已安装的 ffmpeg 或自动下载）
 
 ### 开发模式（前后端分离）
 
 ```bash
 # 终端 1 — 前端 Vite 开发服务器（:5173，WebSocket 代理到 :9000）
-cd views && npm install && npm run dev
+cd views && pnpm install && pnpm run dev
 
 # 终端 2 — Go 后端（:9000）
 go run .
@@ -46,7 +46,7 @@ go run .
 
 ```bash
 # 1. 构建前端（输出到 static/）
-cd views && npm run build
+cd views && pnpm run build
 
 # 2. 编译单一可执行文件
 go build .
