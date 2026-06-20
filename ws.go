@@ -172,7 +172,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 	}
 
 	// ── 输出通道（提前创建，供 reader goroutine 发送状态消息）──
-	outCh := make(chan wsMessage, 8)
+	outCh := make(chan wsMessage, 6)
 
 	// 发送 goroutine（单写 WebSocket，单通道保证顺序）
 	go func() {
@@ -548,7 +548,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 					int32(cachedBounds.Dx()), int32(cachedBounds.Dy()), cachedZoom, data)
 			}
 			if ffH264 {
-				// 非阻塞发送。IDR 丢失仅短暂花屏（~0.85s），
+				// 非阻塞发送。IDR 丢失仅短暂花屏（GOP=60 下约 0.4s），
 				// 远好过硬背压造成多秒管道卡死。
 				select {
 				case outCh <- wsMessage{websocket.BinaryMessage, data}:

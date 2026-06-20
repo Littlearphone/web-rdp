@@ -7,6 +7,7 @@ import { ref, onMounted, onUnmounted, watch } from 'vue';
 import { useAppStore } from '@/stores/app';
 import { registerBinaryHandler } from '@/composables/useWebSocket';
 import { screenCoords } from '@/composables/useCoordinateMapping';
+
 import { createH264Decoder, type H264Decoder } from '@/decoders/h264';
 import { createJpegDecoder, type JpegDecoder } from '@/decoders/jpeg';
 
@@ -160,6 +161,7 @@ function onContextMenu(e: MouseEvent) {
 
 /** 粘贴事件：将浏览器剪贴板内容（文本或图像）发送到远程 */
 async function onPaste(e: ClipboardEvent) {
+  let sent = false;
   // 先检查图像（优先于文本，因为截图粘贴通常包含图像）
   const items = e.clipboardData?.items;
   if (items) {
@@ -171,16 +173,29 @@ async function onPaste(e: ClipboardEvent) {
             const buf = await blob.arrayBuffer();
             const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
             store.send({ clipboard_image: b64 });
-            return; // 图像优先，不发送文本
+            sent = true;
           } catch (_) { /* 读取失败 */ }
         }
       }
     }
   }
   // 回退：检查纯文本
-  const text = e.clipboardData?.getData('text/plain');
-  if (text) {
-    store.send({ clipboard: text });
+  if (!sent) {
+    const text = e.clipboardData?.getData('text/plain');
+    if (text) {
+      store.send({ clipboard: text });
+      sent = true;
+    }
+  }
+
+  // ── Ctrl+V 延迟按键：剪贴板内容先于 V 键到达远程 ──
+  if (sent && store.pendingClipboardPaste) {
+    store.pendingClipboardPaste = false;
+    // 150ms 延迟确保剪贴板消息先被远程处理
+    setTimeout(() => {
+      store.sendKey('KeyV', true);
+      setTimeout(() => store.sendKey('KeyV', false), 50);
+    }, 150);
   }
 }
 

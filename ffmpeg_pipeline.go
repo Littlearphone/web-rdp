@@ -46,7 +46,7 @@ func (f *ffSession) subscribe() (int, <-chan []byte) {
 	defer f.subsMu.Unlock()
 	id := f.nextID
 	f.nextID++
-	ch := make(chan []byte, 6)
+	ch := make(chan []byte, 4)
 	if f.subs == nil {
 		f.subs = make(map[int]chan []byte)
 	}
@@ -264,7 +264,7 @@ func startFFmpeg(id, quality, maxW, fps int, h264 bool) *ffSession {
 	ff := &ffSession{
 		cmd:        cmd,
 		stdout:     bufio.NewReaderSize(stdout, 256*1024),
-		frameCh:    make(chan []byte, 8),
+		frameCh:    make(chan []byte, 5),
 		stopCh:     make(chan struct{}),
 		stderrBuf:  new(bytes.Buffer),
 		stderrDone: make(chan struct{}),
@@ -389,19 +389,19 @@ func h264Args(useDDAGrab bool, id, refreshRate, cx, cy, cw, ch int, vf string, q
 	case "h264_nvenc":
 		// NVIDIA GPU：p1=最快速度, ll=低延迟, vbr+cq=可变码率恒定质量
 		base = append(base, "-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ll",
-			"-rc", "vbr", "-cq", hqs, "-g", "120")
+			"-rc", "vbr", "-cq", hqs, "-g", "60")
 	case "h264_amf":
 		// AMD GPU：speed=最快速度, cqp=恒定质量
 		base = append(base, "-c:v", "h264_amf", "-quality", "speed",
-			"-rc", "cqp", "-qp_p", hqs, "-qp_i", hqs, "-g", "120")
+			"-rc", "cqp", "-qp_p", hqs, "-qp_i", hqs, "-g", "60")
 	case "h264_qsv":
 		// Intel Quick Sync：look_ahead=0 关闭前瞻减少延迟
 		base = append(base, "-c:v", "h264_qsv", "-preset", "veryfast", "-look_ahead", "0",
-			"-async_depth", "1", "-g", "120", "-global_quality", hqs)
+			"-async_depth", "1", "-g", "60", "-global_quality", hqs)
 	case "libx264":
 		// CPU 软件编码回退：ultrafast + zerolatency + 单 slice
 		base = append(base, "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-			"-crf", hqs, "-g", "120", "-x264opts", "slices=1:threads=1")
+			"-crf", hqs, "-g", "60", "-x264opts", "slices=1:threads=1")
 	default:
 		// 编码器列表已耗尽（currentH264Encoder() 返回 ""），无可用的 H.264 编码器
 		return nil

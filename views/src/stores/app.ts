@@ -88,6 +88,7 @@ export const useAppStore = defineStore('app', () => {
 
   /** 剪贴板状态 */
   const remoteClipboard = ref(''); // 最后一次从远端同步的剪贴板文本
+  const pendingClipboardPaste = ref(false); // Ctrl+V 粘贴协调标志
 
   /** 发送当前设置（画质/分辨率/帧率/H.264） */
   function sendSettings() {
@@ -134,7 +135,7 @@ export const useAppStore = defineStore('app', () => {
     statsUser, statsFps, statsEncMs, statsKb, statsW, statsH, statsQ,
     statsOwner, statsMaxRate, statsUsers,
     mobileResOpts, mobileUIBuilt, lastResKey, isMobile,
-    controlStatus, controlMsg, remoteClipboard,
+    controlStatus, controlMsg, remoteClipboard, pendingClipboardPaste,
     // 计算属性
     basePw, basePh, serverAddr, canH264,
     // 操作

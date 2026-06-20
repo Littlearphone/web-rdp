@@ -39,6 +39,9 @@ const MODIFIER_CODES = new Set([
   'MetaLeft', 'MetaRight',
 ]);
 
+/** 剪贴板快捷键 — 不能 preventDefault，否则 paste/copy 事件不触发 */
+const CLIPBOARD_KEYS = new Set(['KeyV', 'KeyC', 'KeyX']);
+
 export function useKeyboardCapture() {
   const store = useAppStore();
 
@@ -62,17 +65,33 @@ export function useKeyboardCapture() {
 
   function onKeyDown(e: KeyboardEvent) {
     if (!store.statsOwner) return;
-    // WebSocket 断开时不拦截任何按键，确保浏览器快捷键（F5 刷新等）正常
     if (!wsOpen()) return;
-    // 输入框聚焦时放行所有组合键，确保 Ctrl+V 粘贴等正常工作
     const tag = (e.target as HTMLElement)?.tagName;
     const isInput = tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement)?.isContentEditable;
     if (isInput) return;
-    // 阻止默认行为但不阻止传播 — 浏览器需要事件正常传播来维护内部键盘状态
+
+    // ── 剪贴板快捷键：放行让浏览器触发 paste/copy 事件 ──
+    if ((e.ctrlKey || e.metaKey) && CLIPBOARD_KEYS.has(e.code) && !e.altKey) {
+      // 不 preventDefault，让 paste/copy 事件正常触发
+      if (e.code === 'KeyV') {
+        // Ctrl+V: 暂不发送 KeyV，由 paste 事件处理器延迟发送，
+        // 确保剪贴板内容先于 V 键到达远程
+        store.pendingClipboardPaste = true;
+        return;
+      }
+      // Ctrl+C / Ctrl+X: 正常放行
+      if (!pressedKeys.has(e.code)) {
+        pressedKeys.add(e.code);
+        store.sendKey(e.code, true);
+      }
+      return;
+    }
+
+    // 阻止默认行为但不阻止传播
     if (PREVENT_KEYS.has(e.code) || e.ctrlKey || e.altKey || e.metaKey) {
       e.preventDefault();
     }
-    // 避免重复按下导致计数偏差（某些平台会连续触发 keydown）
+    // 避免重复按下
     if (!pressedKeys.has(e.code)) {
       pressedKeys.add(e.code);
       store.sendKey(e.code, true);
