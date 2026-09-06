@@ -172,7 +172,8 @@ func (s *nativeSession) produce() {
 	var enc nv12Enc
 	var encName string
 	var tw, th int
-	consecErr := 0 // 连续编码错误计数：超过阈值退出，避免空转打满 CPU/内存
+	var lastSend time.Time // 上次发送帧的时刻，用于按真实间隔给 RTP 时长
+	consecErr := 0         // 连续编码错误计数：超过阈值退出，避免空转打满 CPU/内存
 
 	for {
 		// 无订阅者时不必采集/编码，省 CPU 且避免空转；但需快速响应 stop。
@@ -286,18 +287,39 @@ func (s *nativeSession) produce() {
 		consecErr = 0 // 成功则清零
 		if len(frame) > 0 {
 			s.fanout(frame)
-			// native 帧也写入 WebRTC 轨：让前端 WebRTC 路径真正收到帧，
-			// 消除"后端显示 WebRTC 用户、前端却只走 wss"的状态混乱，并降低首屏延迟。
-			writeWebRTCSample(s.display, frame, time.Second/30)
+			// 按真实帧间隔给 RTP 时长：硬件路径按采集速度推帧，若固定用 33ms(30fps)
+			// 会造成"时间戳比真实时间走得慢"→ 浏览器播放缓冲持续累积 → 延迟递增、
+			// 显示帧率下降。用实测间隔做 Duration 让 RTP 时间戳与真实时间对齐，消除漂移。
+			dur := measuredFrameDur(&lastSend)
+			writeWebRTCSample(s.display, frame, dur)
 		}
 		// 节流：软件编码器慢，需 20ms 保护避免积压；硬件编码器极快，交给采集帧率驱动
-		//（DXGI 只在新帧变化时返回），仅留 1ms 防极速空转，以支持 60fps+ 高帧率。
+		//（DXGI 只在新帧变化时返回），仅留 1ms 防极速空转，以支持高帧率。
 		if encName == "software-sync-MF" {
 			timeSleepMs(20)
 		} else {
 			timeSleepMs(1)
 		}
 	}
+}
+
+// measuredFrameDur 计算距上次发送的实测间隔作为本帧 RTP 时长，并更新 last。
+// 首个帧无基准时给 ~16ms(≈60fps 的合理占位)。间隔钳制在 [1ms, 250ms] 防止异常。
+func measuredFrameDur(last *time.Time) time.Duration {
+	now := time.Now()
+	if last.IsZero() {
+		*last = now
+		return time.Second / 60
+	}
+	d := now.Sub(*last)
+	*last = now
+	if d < time.Millisecond {
+		return time.Millisecond
+	}
+	if d > 250*time.Millisecond {
+		return 250 * time.Millisecond
+	}
+	return d
 }
 
 // timeSleepMs 毫秒睡眠（供测试/日志控制）。

@@ -69,6 +69,7 @@ func newAsyncEncoderSession(width, height int, bitrate uint32) (*asyncHWEncoder,
 		enc.Close()
 		return nil, err
 	}
+	enc.bitrate = bitrate
 	if err := enc.configureTypes(); err != nil {
 		enc.Close()
 		return nil, err
@@ -77,7 +78,6 @@ func newAsyncEncoderSession(width, height int, bitrate uint32) (*asyncHWEncoder,
 		enc.Close()
 		return nil, err
 	}
-	_ = bitrate
 	return enc, nil
 }
 

@@ -114,6 +114,7 @@ type asyncHWEncoder struct {
 	outID  uint32
 	width  int
 	height int
+	bitrate uint32        // 目标码率 bps（0 → 用缺省）
 	dev    *D3D11Device  // D3D11 设备（硬件 MFT 输入所需）
 	mgr    *mfD3DManager // MF DXGI 设备管理器
 }
@@ -175,7 +176,11 @@ func activateAsyncEncoder(width, height int) (*asyncHWEncoder, error) {
 
 // configureTypes 配置 H.264 输出 + NV12 输入类型。
 func (e *asyncHWEncoder) configureTypes() error {
-	outMT, err := buildVideoType(0x34363248, uint32(e.width), uint32(e.height), 30, 1, true, 4_000_000)
+	br := e.bitrate
+	if br == 0 {
+		br = 4_000_000
+	}
+	outMT, err := buildVideoType(0x34363248, uint32(e.width), uint32(e.height), 30, 1, true, br)
 	if err != nil {
 		return err
 	}
