@@ -1,8 +1,9 @@
 # 前端工程
 views/node_modules/
+node_modules/
 
 # 前端构建产物（Vite 生成，Go embed 使用）
-static/
+backend/static/
 
 # IDE
 .idea/
@@ -12,4 +13,4 @@ static/
 *.pem
 *.exe
 web-rdp
-/ffmpeg_local/
+dist/

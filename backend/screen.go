@@ -78,7 +78,7 @@ func encodeFrame(ox, oy, pw, ph int32, zoom float64, jpg []byte) []byte {
 }
 
 // downscale 使用双线性插值将图像缩放到指定最大宽度（等比缩放）。
-// 仅在纯 Go 截图回退路径中使用；ffmpeg 路径在命令行中完成缩放。
+// 仅在纯 Go JPEG 回退路径中使用；native H.264 路径在会话内做 BGRA 降采样。
 func downscale(img *image.RGBA, maxW int) *image.RGBA {
 	if maxW <= 0 || img.Bounds().Dx() <= maxW {
 		return img

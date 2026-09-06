@@ -11,19 +11,25 @@ Web 远程桌面控制（web-rdp）—— 通过浏览器远程控制 Windows �
 ## 构建与开发命令
 
 ```bash
-# 开发模式（前后端分离）
-cd views && pnpm install && pnpm run dev   # 前端 Vite 开发服务器 :5173，WebSocket 代理到 :9000
-go run .                                   # Go 后端 :9000（需先构建前端到 static/）
+# 项目布局: Go 后端集中在 backend/(main 包 + native 包 + go.mod), 前端 views/,
+# 前端构建产物输出 backend/static(供 go:embed), 顶层 package.json = pnpm 一键入口。
+
+# 开发模式（前后端分离）— 根目录一键或手动
+pnpm install && pnpm dev          # 同时起 前端 Vite(:5173) + Go 后端(:9000)
+cd views && pnpm run dev          # 仅前端 Vite :5173，WebSocket 代理到 :9000
+cd backend && go run .            # 仅后端 :9000（backend/static 缺失需先构建前端一次）
 
 # 生产构建
-cd views && pnpm run build                 # vue-tsc 类型检查 + vite 构建 → ../static/
-go build .                       # 编译为单一可执行文件（static/ 通过 embed 内嵌）
+pnpm run build                    # scripts\build.bat: views→backend/static → backend → dist\web-rdp.exe
+# 手工等价:
+cd views && pnpm run build        # → ../backend/static
+cd backend && go build -trimpath -ldflags "-s -w" -o ../dist/web-rdp.exe .
 
 # 运行选项
 web-rdp.exe -port 8080           # 指定端口
 web-rdp.exe -tls=false           # 禁用 HTTPS
-web-rdp.exe -ffmpeg <path>       # 手动指定 ffmpeg 路径
-web-rdp.exe -proxy :7890         # 通过代理下载 ffmpeg
+web-rdp.exe -probe-native        # 探测进程内 MF/GPU 编码后端
+web-rdp.exe -mf-encode           # 单帧 MF H.264 编码冒烟
 ```
 
 ## 技术栈
@@ -32,7 +38,7 @@ web-rdp.exe -proxy :7890         # 通过代理下载 ffmpeg
 |---|---|
 | 后端 | Go 1.26, `gorilla/websocket`, `pion/webrtc/v4`, Win32 syscall API |
 | 前端 | Vue 3 + TypeScript + Pinia + Naive UI, Vite 8, RTCPeerConnection API |
-| 编码 | ffmpeg (H.264 NVENC/AMF/QSV/libx264, MJPEG), WebCodecs API |
+| 编码 | 进程内 native(MF) H.264（硬件异步 MFT 优先，软件 MF 回退）→ 纯 Go JPEG 兜底, WebCodecs API |
 | 传输 | **WebRTC (UDP/RTP 优先)** + WebSocket (TCP/信令/回退)，内网直连无 STUN/TURN |
 | 部署 | 单一 exe，前端静态文件通过 `//go:embed static` 内嵌 |
 
@@ -42,14 +48,21 @@ web-rdp.exe -proxy :7890         # 通过代理下载 ffmpeg
 
 ```
 main.go              HTTP/WS 服务入口 + CLI 标志 + Win32 控制 API（输入模拟、控制权管理）
-ws.go                WebSocket 连接生命周期 + 帧处理主循环 + 编码格式切换 + 用户管理 + WebRTC 信令路由
+ws.go                WebSocket 连接生命周期 + 帧处理主循环 + H.264(进程内 native) ↔ 纯 Go JPEG 切换 + 用户管理 + WebRTC 信令路由
 webrtc.go            WebRTC 全局视频轨 + PeerConnection 生命周期 + SDP/ICE 信令管理（pion/webrtc v4）
 permission.go        控制权限管理 + 深色 Win32 弹窗（权限请求/控制中），runtime.LockOSThread()
-ffmpeg_pipeline.go   ffmpeg 进程池（引用计数）+ H.264 Annex B / MJPEG 读写器 + Fan-out 分发（含 WebRTC 路径）
-ffmpeg_install.go    ffmpeg 自动检测/下载、GPU 供应商检测、编码器优先级排序与回退链
-screen.go            DPI 缩放缓存、帧二进制打包（24B 头部）、纯 Go 截图回退（双线性降采样）
+streamer.go          streamer 抽象 + native H.264 可用性探测
+tiers.go             per-display 共享 DXGI 采集 broker + (display,maxW,fps) 档位键控会话池（同档位共享编码、同屏多档共存）
+native_session.go    档位编码会话（streamer 实现）：消费 broker 帧 → 硬件异步 MFT 优先/软件 MF 回退 → fan-out + 档位 WebRTC
+screen.go            DPI 缩放缓存、帧二进制打包（24B 头部）、纯 Go JPEG 回退（双线性降采样）
 display_windows.go   多显示器刷新率检测（EnumDisplaySettingsW → dmDisplayFrequency）
 ```
+
+> 画质维度已移除：档位参数 = 分辨率(maxW) × 帧率(fps)，码率按固定质量估算。
+> WebRTC 视频轨按档位键控（per-tier track）。
+
+> 已完全移除 ffmpeg（`ffmpeg_install.go`/`ffmpeg_pipeline.go` 已删）。H.264 唯一来源是
+> 进程内 native(MF) 会话；native 产不出帧（或用户关 H.264）时 ws.go 自动落到纯 Go JPEG。
 
 ### WebSocket 消息协议
 
@@ -62,8 +75,8 @@ display_windows.go   多显示器刷新率检测（EnumDisplaySettingsW → dmDi
 | 前端→后端 | JSON (ctrlMsg) | `{key/down/text}` | 键盘事件 / 文本输入 |
 | 前端→后端 | JSON (ctrlMsg) | `{dx1/dy1/dx2/dy2}` | 拖拽起止坐标 |
 | 后端→前端 | Binary | H.264 Annex B 裸流 | H.264 模式下的视频帧（含 AUD/SPS/PPS/SEI） |
-| 后端→前端 | Binary | `[24B meta + JPEG]` | MJPEG 模式：ox/oy/pw/ph/zoom(8B) + JPEG 数据 |
-| 后端→前端 | JSON | `{format, quality, maxw, fps}` | 格式切换通知（初始连接或 ffmpeg 重启时） |
+| 后端→前端 | Binary | `[24B meta + JPEG]` | JPEG(纯 Go) 模式：ox/oy/pw/ph/zoom(8B) + JPEG 数据 |
+| 后端→前端 | JSON | `{format, quality, maxw, fps}` | 格式切换通知（初始连接或 native H.264↔JPEG 切换时） |
 | 后端→前端 | JSON (每秒) | `{fps, enc_ms, kb, owner, q, w, h, ox, oy, zoom, screens, maxrate, users}` | 性能统计 |
 | 后端→前端 | JSON | `{control_status, control_msg}` | 控制状态变更：granted/denied/busy/pending |
 | 前端→后端 | JSON | `{rtc_webrtc: true}` | 告知支持 WebRTC，触发后端创建 PeerConnection（仅 H.264 模式） |
@@ -72,35 +85,27 @@ display_windows.go   多显示器刷新率检测（EnumDisplaySettingsW → dmDi
 | 双向 | JSON | `{rtc_ice: {...}}` | WebRTC ICE Candidate 交换（自动双向） |
 | 后端→前端 | RTP/UDP | H.264 Annex B | WebRTC 视频轨（仅 H.264，UDP 直连，不经过 WebSocket 信道） |
 
-### ffmpeg 会话池（核心）
+### 档位会话与共享采集（核心）
+
+`tiers.go` 每显示器一个 `captureBroker`（引用计数，共享一路 DXGI 采集，规避 `DuplicateOutput` 每输出单采集限制）；`ws.go` 按档位 `(display, maxW, fps)` 经 `acquireTier` 加入/新建编码会话。画质维度已移除，码率按固定质量估算。
+
+- 档位编码会话（`native_session.go`）：消费 broker 帧 → 降采样→NV12 → MFH264Encoder（硬件异步 MFT 优先→软件 MF）→ fan-out 到同档位订阅者，并写档位 WebRTC 轨（`writeTierWebRTCSample`，非阻塞丢弃）
+- 订阅模型：多订阅者各自 `subscribe()` 拿独立通道，通道满丢旧保新；`unsubscribe` 后无订阅者自动停会话
+- 会话退出（编码器/采集不可用、连续编码错误）会广播 `nil`(EOF) 并置 `ended`；ws.go 据此判定"native 产不出帧"
+- 前端 WebRTC 活跃时 ws.go 跳过 WS 帧（`userRTCVideoStatus` 检查）避免双路重复渲染
+- 像素率上限：stats 按 700M 像素/秒钳制显示刷新率，防编码积压
+
+### 编码回退链（native 唯一 H.264 源）
 
 ```
-ffPool[displayID] → *ffSession（每显示器一个 ffmpeg 进程，多用户共享）
-ffRefs[displayID] → int（引用计数，所有用户断开时停进程）
+硬件异步 MFT（NativeAsyncMFH264Encoder，跨厂商，优先）
+  → 软件同步 MF（NewMFH264EncoderQ，无 GPU 亦可）
+    → 两者都失败：会话广播 EOF → ws.go 落纯 Go JPEG
 ```
 
-- `acquireFFmpeg`：获取或创建会话（参数匹配则复用，否则用池中现有参数）
-- `restartFFmpeg`：**仅控制者**调用，停止旧会话并用新参数重建。**必须在调用前通过 releaseFFmpeg 释放自己的引用**，且必须保留其他订阅者的引用计数迁移到新会话
-- `releaseFFmpeg`：减引用，至 0 时停止进程并清理
-- Fan-out goroutine：将 `frameCh` 的每帧复制给所有订阅者独立通道（WebSocket 路径），同时 H.264 帧写入全局 WebRTC Track（`writeWebRTCSample`，非阻塞丢弃）。双路并行，前端 WebRTC 活跃时跳过 WS 帧避免重复渲染
-- 池参数（`ffPoolQ/MW/FPS/H264`）在 `acquireFFmpeg` 后同步回调用方的 atomic 变量，确保非控制者的本地追踪变量与池一致
-- 支持 `ddagrab`（DXGI 零拷贝桌面捕获）和 `gdigrab`（传统 GDI）两种捕获模式
-- 像素率限制：每显示器 700M 像素/秒上限，防止编码器积压
-- H.264 帧丢弃：非 IDR 帧在 channel 满时丢弃旧帧保留新帧，IDR 关键帧阻塞送达确保解码器不花屏。h264Reader → frameCh → 扇出 → outCh 三级均可丢弃，防止管道反向阻塞 ffmpeg stdout
-
-### 编码器回退链
-
-`h264Encoders` 按优先级排列：
-```
-h264_nvenc (NVIDIA, preset=p1 + tune=ll + rc=vbr + cq)
-  → h264_amf (AMD, quality=speed + rc=cqp)
-    → h264_qsv (Intel, preset=veryfast + look_ahead=0 + async_depth=1)
-      → libx264 (软件, preset=ultrafast + tune=zerolatency + crf + slices=1 + threads=1)
-```
-
-编码失败时 `tryNextH264Encoder()` 递增索引回退。所有 H.264 编码器耗尽后 `useH264=false` 回退到 MJPEG（ffmpeg mjpeg 编码器）。最终回退：纯 Go `image/jpeg` 编码 + `draw.BiLinear.Scale` 降采样，限速 60 fps。
-
-画质映射：用户滑块 30-100 → H.264 CRF/CQ 1-51 或 MJPEG Q 1-31。
+- native 会话启动即失败或中途产不出帧 → ws.go 置 `nativeDead` 并发 `format=jpeg`，此后该连接恒用纯 Go JPEG（`screenshot.CaptureDisplay` + `image/jpeg`，限速 60 fps）
+- H.264 可用性：`h264Available()` 惰性探测一次能否构建 MF H.264 编码器（硬件或软件皆可）
+- 画质映射：用户滑块 30-100 → 码率估算（`native.EstimateBitrateForQuality`）或 JPEG 质量
 
 ### 前端文件结构与职责
 
@@ -182,7 +187,7 @@ types/index.ts                  TypeScript 类型定义
 | 显示偏移 | `ox`, `oy` | 相对于虚拟桌面原点 |
 | DPI 缩放 | `zoom` | 显示器缩放比例 |
 | 显示器数 | `screens` | 活动显示器数量 |
-| 刷新率上限 | `maxrate` | 显示器最大刷新率（仅 ddagrab） |
+| 刷新率上限 | `maxrate` | 显示器最大刷新率（native DXGI 采集，像素率钳制） |
 | 在线用户 | `users` | 当前 WebSocket 连接数 |
 | 控制者 | `owner` | 当前控制者用户名 |
 | 画质 | `q` | 当前画质设置 |
@@ -198,28 +203,28 @@ types/index.ts                  TypeScript 类型定义
 | 场景 | 处理机制 |
 |------|----------|
 | WebSocket 断线 | 指数退避重连：5s→10s→20s→最大30s，前端倒计时覆盖层 |
-| ffmpeg 进程退出 | H.264 reader 发送 `nil` → 主循环回退到下一编码器或 MJPEG |
-| ffmpeg 无帧超时 | 5 秒超时触发回退链 |
-| 所有 H.264 编码器失败 | `useH264=false`，回退 MJPEG |
-| 无 ffmpeg | 纯 Go `screenshot.CaptureDisplay` + `image/jpeg` 回退，限速 60fps |
+| native 会话退出 | 产帧 goroutine 广播 `nil`(EOF) 并置 `ended` → ws.go 判"产不出帧"，回退纯 Go JPEG |
+| native 会话 8s 无帧且已结束 | 从未产帧 → 判产不出帧，回退 JPEG |
+| native 编码器(硬件/软件)均失败 | 会话广播 EOF → ws.go 落到纯 Go JPEG |
+| 静止桌面 | native 采集仅在桌面变化时产帧，静止无帧属正常，不视为故障 |
 | 解码错误 | H.264: `decoder.error` 回调 + 关键帧保护；JPEG: `createImageBitmap` 静默捕获 |
 | 首帧保护 | 首个 `decode()` 必须为关键帧，跳过非关键帧直至收到关键帧 |
 | 键盘安全 | 失焦/隐藏/断连/剥夺控制权时自动释放所有已按下按键 |
-| 格式切换 | `resetDecoders()` 重建解码器，状态 `switching` 阻止渲染。MJPEG 模式自动关闭 WebRTC |
+| 格式切换 | `resetDecoders()` 重建解码器，状态 `switching` 阻止渲染。切到 JPEG 时自动关闭 WebRTC |
 | WebRTC 失败/断连 | `pc.onconnectionstatechange` → `failed/disconnected` 清理会话；前端 `watch connectionStatus` → 重连后重新创建 WebRTC。视频回退到 WebSocket 二进制帧（`isWebRTCConnected()` 为 false 时自动接管） |
 
 ## 重要约定
 
 - 解码器创建/关闭必须在 `ScreenCanvas` 生命周期内（`onMounted`/`onUnmounted`）
 - `streamFormat` 切换时调用 `resetDecoders()`，格式消息到达前 `connectionStatus = 'switching'`
-- 后端 `current*` 变量使用 `atomic.Int32/Bool`，参数变化检查 `paramsChanged` 必须在主循环原子读取后立即计算
-- `restartFFmpeg` 的调用者必须先 `ff.unsubscribe(subID)` + `releaseFFmpeg(curScreen)` 再调用
-- 非控制者进入 `acquireFFmpeg` 路径后，池同步代码会将 atomic 变量覆写为池中实际值（这是预期行为）
+- 后端 `current*` 变量使用 `atomic.Int32/Bool`，参数变化检查必须在主循环原子读取后立即计算
+- 档位变化：先 `teardownSession()`（unsubscribe；若是该档位最后观众即自动停并释放采集 feed），再 `acquireTier(id, maxW, fps)` 加入/新建档位会话
+- ws.go 帧循环于本迭代内原子读取后立即判定档位是否变化（curScreen/maxW/fps 任一变化 → 切档位；画质维度已移除）
 - Win32 UI（权限弹窗）必须 `runtime.LockOSThread()` + 消息循环结束 `UnlockOSThread()`
 - **WebRTC 时序**：前端必须在 `connectionStatus === 'connected'` 后（或已在 connected 状态时）初始化 WebRTC，否则 `store.send()` 因 WS 未 OPEN 而静默丢弃 `{rtc_webrtc: true}`
 - **WebRTC 双路避让**：`useWebSocket.ts` 的二进制帧 handler 在 `isWebRTCConnected()` 为 true 时跳过——避免同一画面被 WebRTC 和 WS 双重渲染
-- **WebRTC 生命周期**：`ScreenCanvas` 的 `watch connectionStatus` 在 `disconnected/failed` 时自动 `webrtc.close()`；`watch streamFormat` 切换为 `jpeg` 时关闭 WebRTC（MJPEG 不适用 RTP）
-- **pion 全局视频轨**：单 `TrackLocalStaticSample` 供所有 PeerConnection 共享，所有显示器 H.264 帧写入同一轨。`WriteSample` 非阻塞，无订阅者时静默丢弃——禁止反压阻塞 ffmpeg
+- **WebRTC 生命周期**：`ScreenCanvas` 的 `watch connectionStatus` 在 `disconnected/failed` 时自动 `webrtc.close()`；`watch streamFormat` 切换为 `jpeg` 时关闭 WebRTC（JPEG 不适用 RTP）
+- **pion per-tier 视频轨**：`tierTracks[trackKey]`(显示器-maxW-fps) 每档位一条 `TrackLocalStaticSample`；用户 PeerConnection 订阅其当前档位轨，档位/显示器变化时 `restartRTC` 通知前端重建。`WriteSample` 非阻塞，无订阅者时静默丢弃——禁止反压阻塞档位产帧
 - **后端信令在 `ws.go` 处理**：`ctrlMsg.RTCWebRTC/SDP/Ice` 在 read goroutine 中处理，ICE candidate 通过 `sendFn` 回调利用用户级 `outCh` 推送
 
 ## 待实现
@@ -228,17 +233,17 @@ types/index.ts                  TypeScript 类型定义
 
 - [x] **剪贴板同步**：双向文本 + 图像剪贴板同步。文本通过 `CF_UNICODETEXT` + JSON 消息同步；图像通过 `CF_DIB ↔ PNG` 转换 + base64 JSON 消息同步。前端 `onCopy` 使用同步 `e.clipboardData.getData()`（而非异步 `navigator.clipboard.readText()`）确保可靠性。前端 `onPaste` 支持 `ClipboardEvent.items` 中的 image/png 类型。
 - [x] **密码认证**：`-password` 参数，challenge-response (SHA-256) 认证。匿名用户（无密码）需宿主审批。待扩展：失败次数限制 + IP 冷却防暴力破解。
-- [x] **WebRTC 传输**：H.264 视频通过 WebRTC (UDP/RTP) 传输，WebSocket 保留为信令通道和 MJPEG/H.264 回退。后端 pion/webrtc v4 → `TrackLocalStaticSample` 全局视频轨，前端 `RTCPeerConnection` + hidden `<video>` 解码 + rAF 绘制。内网直连无 STUN/TURN。`writeWebRTCSample` 非阻塞，无订阅者时静默丢弃帧。格式切换至 MJPEG 或 WebRTC 连接失败时自动回退 WebSocket。
-- [ ] **音频传输**：后端 WASAPI Loopback 捕获系统音频 → ffmpeg Opus/AAC 编码 → 前端 Web Audio API 播放。与视频帧 PTS 时间戳对齐。WebRTC 可复用同一 PeerConnection 的音频轨。
+- [x] **WebRTC 传输**：H.264 视频通过 WebRTC (UDP/RTP) 传输，WebSocket 保留为信令通道和 JPEG/H.264 回退。后端 pion/webrtc v4 → per-display `TrackLocalStaticSample`，前端 `RTCPeerConnection` + hidden `<video>` 解码 + rAF 绘制。内网直连无 STUN/TURN。`writeWebRTCSample` 非阻塞，无订阅者时静默丢弃帧。格式切至 JPEG 或 WebRTC 连接失败时自动回退 WebSocket。
+- [ ] **音频传输**：后端 WASAPI Loopback 捕获系统音频 → 进程内 Opus/AAC 编码 → 前端 Web Audio API 播放。与视频帧 PTS 时间戳对齐。WebRTC 可复用同一 PeerConnection 的音频轨。（ffmpeg 已移除，音频编码需自选/自实现 native 编码栈）
 
 ### 体验提升（中优先级）
 
 - [x] **动态码率自适应**：前端每 2 秒上报实际接收帧率 + 解码队列深度 → 后端 `adapt.go` 拥塞检测 → 在控制者偏好上限内自动降级画质/帧率/分辨率，恢复时逐级回升。两条策略：画质优先（先降帧率）和流畅优先（先降画质）。仅控制者网络反馈驱动自适应，5s 冷却防抖。WebRTC 路径 GCC 提供额外传输层调节。
 - [ ] **光标渲染同步**：后端 `GetCursorInfo` 捕获光标位置 + 形状 → 前端 CSS 绝对定位 canvas 叠加渲染本地光标，消除"光标在哪"的困惑。
 - [ ] **全屏模式**：`Element.requestFullscreen()` + `navigator.keyboard.lock()`，全屏时隐藏顶栏/侧边栏。
-- [ ] **HEVC/AV1 编码支持**：`hevc_nvenc`/`hevc_amf`/`hevc_qsv` 或 AV1，前端 `VideoDecoder.isConfigSupported()` 能力检测后协商编码格式。
+- [ ] **HEVC/AV1 编码支持**：基于进程内 MF 的 HEVC/AV1 编码器 MFT 探测（对齐现有 H.264 native 会话路径），前端 `VideoDecoder.isConfigSupported()` 能力检测后协商编码格式。
 - [ ] **日志与诊断**：分级日志（DEBUG/INFO/WARN/ERROR）+ 文件持久化。`/health` 端点（版本/运行时间/连接数/编码器状态）。开发模式 `/debug/pprof`。
-- [ ] **多流独立编码**：当前同显示器所有用户共享一个 ffmpeg 进程，参数由控制者决定。改为 `pool[{displayID, userID}]` 每用户独立 ffmpeg（或至少控制者独立），使不同用户可使用不同分辨率/画质/帧率。需评估 GPU 编码器并发能力（NVENC 通常支持 2-3 路）。
+- [x] **共享采集的 native 会话池（已完成）**：`tiers.go` 的 `captureBroker`（每显示器共享一路 DXGI 采集）+ `(display,maxW,fps)` 档位键控会话；同档位多观众共享同一会话（多订阅 fan-out），同屏多档经共享采集共存。画质维度已移除。剩余约束：硬件 MF 编码器并发约 2–3 路，超出时新档位回退软件 MF / 纯 Go JPEG。
 
 ### 锦上添花（低优先级）
 

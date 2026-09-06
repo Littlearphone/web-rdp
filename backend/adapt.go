@@ -81,7 +81,7 @@ func feedNetworkStats(fps float64, queue int) {
 }
 
 // adaptParams 返回当前应使用的编码参数和自适应是否激活。
-// 由主循环在重启 ffmpeg 前调用，替代用户设定值。
+// 由主循环在应用参数/重建会话前调用，替代用户设定值。
 //
 // 返回值：q, fps, mw, active
 //   - active=false: 使用返回值等同于用户设定，自适应未介入

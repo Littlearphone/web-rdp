@@ -8,7 +8,7 @@ export default defineConfig({
     alias: { '@': resolve(__dirname, 'src') },
   },
   build: {
-    outDir: '../static',
+    outDir: '../backend/static',
     emptyOutDir: true,
     chunkSizeWarningLimit: 600,
   },

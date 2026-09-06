@@ -1,0 +1,18 @@
+{
+  "name": "web-rdp-dev",
+  "version": "1.0.0",
+  "private": true,
+  "description": "web-rdp 根工程：Go 后端(backend/) + Vue 前端(views/)，前端构建产物输出到 backend/static 供 go:embed。",
+  "scripts": {
+    "dev": "concurrently -k -n fe,be -c auto \"pnpm --dir views dev\" \"scripts\\dev-backend.bat\"",
+    "dev:fe": "pnpm --dir views dev",
+    "dev:be": "scripts\\dev-backend.bat",
+    "build": "scripts\\build.bat --no-pause",
+    "build:fe": "pnpm --dir views build",
+    "build:be": "scripts\\build-backend.bat"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.0"
+  },
+  "packageManager": "pnpm@11.11.0"
+}

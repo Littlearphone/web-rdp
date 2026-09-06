@@ -50,10 +50,10 @@ func userNameFor(ip string) string {
 }
 
 // handleWS 处理单个 WebSocket 连接的生命周期。
-// 启动后持续读取控制消息并截屏推流，支持 MJPEG / H.264 双编码格式动态切换。
-// 当连接断开或 ffmpeg 异常退出时自动清理资源。
+// 启动后持续读取控制消息并推流：H.264 走进程内 native(MF) 会话（唯一 H.264 源），
+// native 产不出帧或用户关 H.264 时落到纯 Go JPEG 回退。断开时自动清理资源。
 func handleWS(conn *websocket.Conn, r *http.Request) {
-	var ff streamer // 编码会话（经 streamPool 获取；默认 ffmpeg provider，可切换 native）
+	var ff streamer         // 编码会话（native MF H.264 会话；产不出帧时落到纯 Go JPEG）
 	var useH264 atomic.Bool // H.264 优先，原子操作避免 data race
 	var curScreen int = -1
 	var subID int
@@ -96,7 +96,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 		log.Printf("[%s] 已断开  在线 %d 人", userName, connCount.Load())
 		if ff != nil {
 			ff.unsubscribe(subID)
-			currentSessionPool.get().release(curScreen)
+			ff = nil
 		}
 		releaseControl(userName)
 		removeRTCSession(userName) // 清理 WebRTC PeerConnection
@@ -163,7 +163,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 	}
 
 	// ── 发送用户名 + 编码格式 ──
-	// H.264 可用 = ffmpeg 有编码器，或 native MF 路径已开启且可用。
+	// H.264 可用 = 进程内 native(MF) 编码器可构建（硬件异步 MFT 或软件 MF 回退）。
 	useH264.Store(h264Available())
 	format := "jpeg"
 	if useH264.Load() {
@@ -364,8 +364,10 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				}
 				// ── WebRTC 信令处理 ──
 				if cm.RTCWebRTC != nil && *cm.RTCWebRTC && webRTCEnabled() {
-					// 前端告知支持 WebRTC → 创建 PeerConnection + 生成 Offer（仅含当前显示器 Track）
-					offer, err := createRTCSession(userName, int(currentID.Load()), sendJSON)
+					// 前端告知支持 WebRTC → 用其当前档位(trackKey)创建 PeerConnection + Offer。
+					id := int(currentID.Load())
+					tk := tierTrackKey(tierKey{display: id, maxW: int(currentMaxW.Load()), fps: int(currentFPS.Load())})
+					offer, err := createRTCSession(userName, tk, id, sendJSON)
 					if err != nil {
 						log.Printf("[%s] WebRTC 会话创建失败: %v", userName, err)
 					} else {
@@ -402,23 +404,99 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 
 	// ── 帧处理 ──
 	var (
-		ffScreen     = -1
-		ffQ          = -1
-		ffMW         = -1
-		ffFPS        = -1
-		ffH264       = false
-		h264Timeouts int // 连续超时计数，3 次后暂回退 MJPEG
-		totalBytes   int // 统计周期内累计字节数，用于计算实际码率
-		goJpgBuf     bytes.Buffer
-		frames       int
-		totalWait    time.Duration
-		lastStats    time.Time
-		lastFrame    time.Time
-		maxWait      time.Duration
-		cachedBounds image.Rectangle
-		cachedZoom   float64
-		cacheFrame   int
+		sessMW, sessFPS = -1, -1
+		sessKey         tierKey // 当前绑定的档位 (display,maxW,fps)
+		sessH264        bool    // 当前会话是否为 H.264（native 恒 true）
+		nativeDead      bool    // 本次连接判定 native H.264 产不出帧 → 此后恒 JPEG
+		lastFormatSent  string  // 最近一次告知前端的流格式（h264/jpeg），用于切换去重
+		totalBytes      int     // 统计周期内累计字节数，用于计算实际码率
+		goJpgBuf        bytes.Buffer
+		frames          int
+		totalWait       time.Duration
+		lastStats       time.Time
+		lastFrame       time.Time
+		maxWait         time.Duration
+		cachedBounds    image.Rectangle
+		cachedZoom      float64
+		cacheFrame      int
 	)
+
+	// sendFormat 告知前端当前编码格式（h264/jpeg）。切换时前端据此重建解码器并开关 WebRTC。
+	sendFormat := func(f string, q, mw, fpsV int) {
+		if b, _ := json.Marshal(map[string]interface{}{
+			"format": f, "quality": q, "maxw": mw, "fps": fpsV,
+		}); b != nil {
+			outCh <- wsMessage{websocket.TextMessage, b}
+		}
+		lastFormatSent = f
+	}
+
+	// teardownSession 注销当前订阅的档位会话并复位绑定状态。
+	// 若自己是该档位最后一个订阅者，会话自动停并释放采集 feed；否则会话保留供他人共享。
+	teardownSession := func() {
+		if ff != nil {
+			ff.unsubscribe(subID)
+			ff = nil
+		}
+		subID = 0
+		subCh = nil
+		curScreen = -1
+		sessKey = tierKey{}
+		sessMW, sessFPS = -1, -1
+		sessH264 = false
+	}
+
+	// refreshMeta 周期性刷新显示器物理边界与 DPI 缩放（用于元数据头与统计坐标映射）。
+	refreshMeta := func(id int) {
+		if cacheFrame <= 0 {
+			cachedBounds = screenshot.GetDisplayBounds(id)
+			cachedZoom = getScreenZoom(id)
+			cacheFrame = 30
+		}
+		cacheFrame--
+	}
+
+	// flushStats 每秒推送一次性能统计（H.264 与 JPEG 共用）。
+	flushStats := func(id, q int) {
+		elapsed := time.Since(lastStats)
+		if elapsed < time.Second {
+			return
+		}
+		fpsV := float64(frames) / elapsed.Seconds()
+		maxWms := float64(maxWait.Microseconds()) / 1000
+		// 显示器刷新率上限（native 走 DXGI 采集，语义同 ddagrab）。
+		maxRate := 60
+		if r := getDisplayRefreshRate(id); r > 0 {
+			maxRate = r
+		}
+		if px := cachedBounds.Dx() * cachedBounds.Dy(); px > 0 {
+			if c := 700_000_000 / px; maxRate > c {
+				maxRate = c
+			}
+		}
+		if maxRate < 60 {
+			maxRate = 60
+		}
+		adaptActive, adaptQVal, adaptFpsVal := getAdaptStatus()
+		stat := statsMsg{
+			FPS: math.Round(fpsV*10) / 10, EncMs: math.Round(maxWms*10) / 10,
+			KB: math.Round(float64(totalBytes)/elapsed.Seconds()/102.4) / 10, Owner: controlOwner,
+			Ox: cachedBounds.Min.X, Oy: cachedBounds.Min.Y, Zoom: cachedZoom,
+			Q: q, W: cachedBounds.Dx(), H: cachedBounds.Dy(),
+			Screens: screenshot.NumActiveDisplays(), MaxRate: maxRate,
+			Users:       int(connCount.Load()),
+			AdaptActive: adaptActive,
+			AdaptQ:      adaptQVal,
+			AdaptFPS:    adaptFpsVal,
+		}
+		if b, _ := json.Marshal(stat); b != nil {
+			select {
+			case outCh <- wsMessage{websocket.TextMessage, b}:
+			default:
+			}
+		}
+		frames, totalBytes, totalWait, maxWait, lastStats = 0, 0, 0, 0, time.Now()
+	}
 
 	// ── 剪贴板轮询（本地变更 → 推送远端）──
 	clipTicker := time.NewTicker(500 * time.Millisecond)
@@ -488,7 +566,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 		}
 		q, mw, fps := int(currentQuality.Load()), int(currentMaxW.Load()), int(currentFPS.Load())
 
-		// 自适应码率：仅 H.264 模式生效（MJPEG 无此机制）
+		// 自适应码率：仅 H.264 模式生效（JPEG 无此机制）。
 		isCtrl := hasControl(userName)
 		if isCtrl && useH264.Load() {
 			if aq, afps, amw, active := adaptParams(q, fps, mw); active {
@@ -496,130 +574,51 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			}
 		}
 
-		if useFFmpeg {
-			// ── MJPEG → H.264 定期重试 ──
-			// 曾工作过的编码器仅因过载超时（非兼容性问题），
-			// 冷却 30s 后重试，避免永久困在 MJPEG。
-			if !useH264.Load() && hasWorkingH264Encoder() &&
-				!h264FallbackTime.IsZero() && time.Since(h264FallbackTime) > 30*time.Second {
-				if retryH264Encoders() {
-					useH264.Store(true)
-					if ff != nil {
-						ff.unsubscribe(subID)
-						currentSessionPool.get().release(curScreen)
-						ff = nil
-						ffScreen = -1
-						curScreen = -1
-					}
-				}
-			}
+		// 仅当用户要求 H.264 且 native 尚未被判定"产不出帧"时才走 native 会话。
+		wantH264 := useH264.Load() && !nativeDead
 
-			// ── ffmpeg 路径 ──
-			h264 := useH264.Load()
-			paramsChanged := ffQ != q || ffMW != mw || ffFPS != fps || ffH264 != h264
-			isCtrl = hasControl(userName)
+		if wantH264 {
+			// ═══ H.264 档位会话路径（每显示器共享一路采集；档位=(display,maxW,fps) 共享编码）═══
+			// 显示器或分辨率/帧率变化 → 离开旧档位、加入(或新建)对应档位会话。
+			if ff == nil || curScreen != id || sessMW != mw || sessFPS != fps {
+				prevDisp := curScreen // teardownSession 会复位它
+				prevKey := sessKey
+				first := ff == nil
+				teardownSession()
 
-			// 仅控制者可因参数变化重启 ffmpeg；非控制者静默接受现有参数
-			// （放开：允许连接用户调画质/分辨率/帧率，不强制要求控制权）
-			if ff == nil || ffScreen != id || paramsChanged {
-				firstJoin := ff == nil
-				if ff != nil {
-					ff.unsubscribe(subID)
-					currentSessionPool.get().release(curScreen)
-				}
-				if paramsChanged {
-					ff = currentSessionPool.get().restart(id, q, mw, fps, h264)
-				} else {
-					ff = currentSessionPool.get().acquire(id, q, mw, fps, h264)
-				}
-				if ff == nil {
-					log.Printf("[%s] ffmpeg 启动失败 display=%d", userName, id)
-					if h264 && tryNextH264Encoder() {
-						continue // 回退到下一个编码器重试
-					}
-					if h264 {
-						useH264.Store(false)
-						log.Printf("H.264 编码器全部失败，回退 MJPEG")
-						continue
-					}
-					time.Sleep(time.Second)
-					continue
-				}
+				sessKey = tierKey{display: id, maxW: mw, fps: fps}
+				ff = acquireTier(id, mw, fps)
+				sessMW, sessFPS = mw, fps
 				subID, subCh = ff.subscribe()
-
-				// native 会话的格式需从会话本体读取（nativePool 不写 ffPool 参数表）。
-				if usingNativePool() && ff != nil {
-					ffH264 = ff.h264Mode()
-					ffQ = q
-					ffMW = mw
-					ffFPS = fps
-					useH264.Store(ffH264)
-					h264 = ffH264
-				}
-
-				// 对齐追踪变量到池中实际参数（加入已有会话时可能与用户默认值不同）
-				// 注意：不同步 currentFPS —— fps=0 表示"自动检测"，
-				// 主屏自动检测到的 180Hz 若写入 currentFPS 会变成硬编码值，
-				// 导致副屏切换时跳过多显示器独立自动检测，锁死在主屏的刷新率。
-				ffPoolMu.Lock()
-				if _, ok := ffPool[id]; ok {
-					ffQ = ffPoolQ[id]
-					ffMW = ffPoolMW[id]
-					ffFPS = ffPoolFPS[id]
-					ffH264 = ffPoolH264[id]
-					currentQuality.Store(int32(ffQ))
-					currentMaxW.Store(int32(ffMW))
-					useH264.Store(ffH264)
-					// 同步局部变量，确保本迭代内格式消息携带正确值
-					q, mw, fps = ffQ, ffMW, ffFPS
-					h264 = ffH264
-				}
-				ffPoolMu.Unlock()
-
-				// 显示器切换且当前为 H.264 → 重建 WebRTC 会话以绑定新 Track
-				if ffScreen != id && ffH264 && webRTCEnabled() {
-					restartRTCForDisplay(userName, id, sendJSON)
-				}
-				ffScreen = id
 				curScreen = id
+				sessH264 = ff.h264Mode() // native 恒 true
+				useH264.Store(sessH264)
 				cacheFrame = 0
+
 				f := "jpeg"
-				if ffH264 {
+				if sessH264 {
 					f = "h264"
 				}
-				// 仅在有意义的场景打印日志
-				if paramsChanged && isCtrl {
-					log.Printf("[%s] 调整参数 → %s q=%d mw=%d fps=%d", userName, f, ffQ, ffMW, ffFPS)
-				} else if firstJoin {
-					log.Printf("[%s] 加入会话 → 显示器%d %s q=%d mw=%d", userName, id, f, ffQ, ffMW)
+				if first {
+					log.Printf("[%s] 加入档位 → 显示器%d %s mw=%d fps=%d", userName, id, f, sessMW, sessFPS)
+				} else {
+					log.Printf("[%s] 调整档位 → 显示器%d %s mw=%d fps=%d", userName, id, f, sessMW, sessFPS)
 				}
-				if b, _ := json.Marshal(map[string]interface{}{
-					"format": f, "quality": ffQ, "maxw": ffMW, "fps": ffFPS,
-				}); b != nil {
-					outCh <- wsMessage{websocket.TextMessage, b}
+				sendFormat(f, q, mw, fps)
+
+				// 档位会话启动即失败（采集/编码器不可用且未送出任何帧）→ 判定 native 产不出帧。
+				if sessH264 && ff.ended() && !ff.hasSentFrames() {
+					log.Printf("[%s] H.264 档位无法启动(display=%d)，回退 JPEG", userName, id)
+					teardownSession()
+					nativeDead = true
+					useH264.Store(false)
+					sendFormat("jpeg", q, mw, fps)
+					continue
 				}
 
-				// ── H.264 解码器预热：抢在二进制帧前推送 SPS/PPS ──
-				// h264Reader 异步产出首帧后缓存 SPS/PPS；轮询获取后通过 JSON
-				// 发送给前端，前端可提前 configure() 解码器，省掉 init() 扫描延迟。
-				if ffH264 {
-					deadline := time.Now().Add(200 * time.Millisecond)
-					var sps, pps []byte
-					for time.Now().Before(deadline) {
-						sps, pps = getCachedSPSPPS(id)
-						if sps != nil && pps != nil {
-							break
-						}
-						time.Sleep(5 * time.Millisecond)
-					}
-					if sps != nil && pps != nil {
-						if b, _ := json.Marshal(map[string]string{
-							"h264_sps": base64.StdEncoding.EncodeToString(sps),
-							"h264_pps": base64.StdEncoding.EncodeToString(pps),
-						}); b != nil {
-							outCh <- wsMessage{websocket.TextMessage, b}
-						}
-					}
+				// 显示器或档位变化且该用户已有 WebRTC 会话 → 重建绑定新档位轨（无旧会话则空操作）。
+				if (prevDisp != id || prevKey != sessKey) && webRTCEnabled() {
+					restartRTC(userName, tierTrackKey(sessKey), id, sendJSON)
 				}
 			}
 
@@ -627,84 +626,39 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			select {
 			case data = <-subCh:
 				if data == nil {
-					// 记录当前编码器是否曾成功输出帧（用于判断是兼容性问题还是过载）
+					// native 产帧 goroutine 结束（编码器/采集不可用或中途失败）。
 					hadFrames := ff != nil && ff.hasSentFrames()
-					encName := ""
-					if ffH264 {
-						encName = currentH264Encoder()
-					}
-
-					ff.unsubscribe(subID)
-					currentSessionPool.get().release(curScreen)
-					ff = nil
-					ffScreen = -1
-					curScreen = -1
-
-					if ffH264 && !usingNativePool() {
-						if hadFrames {
-							// 编码器曾工作 → 标记可用，重试同一编码器
-							markH264EncoderWorked(encName)
-							h264Timeouts++
-							if h264Timeouts >= 3 {
-								useH264.Store(false)
-								h264FallbackTime = time.Now()
-								h264Timeouts = 0
-								log.Printf("[%s] %s 连续3次异常退出，暂回退 MJPEG（30s 后重试）", userName, encName)
-							} else {
-								log.Printf("[%s] %s 异常退出（%d/3），重试同一编码器", userName, encName, h264Timeouts)
-							}
-						} else if tryNextH264Encoder() {
-							// 编码器从未输出帧 → 兼容性问题，尝试下一个
-							continue
-						} else {
-							useH264.Store(false)
-							h264FallbackTime = time.Now()
-							log.Printf("所有 H.264 编码器已耗尽，回退到 MJPEG")
-						}
+					teardownSession()
+					if !hadFrames {
+						log.Printf("[%s] native H.264 产不出帧，回退 JPEG", userName)
+						nativeDead = true
+						useH264.Store(false)
+						sendFormat("jpeg", q, mw, fps)
+					} else {
+						log.Printf("[%s] native H.264 会话中断，将重建会话", userName)
 					}
 					continue
 				}
-				h264Timeouts = 0 // 帧正常到达，清零超时计数
 			case <-readErr:
 				return
 			case <-time.After(8 * time.Second):
-				log.Printf("[%s] 会话超时无帧 display=%d", userName, curScreen)
-
-				hadFrames := ff != nil && ff.hasSentFrames()
-				encName := ""
-				if ffH264 {
-					encName = currentH264Encoder()
-				}
-
-				ff.unsubscribe(subID)
-				currentSessionPool.get().release(curScreen)
-				ff = nil
-				ffScreen = -1
-				curScreen = -1
-
-				if ffH264 && !usingNativePool() {
-					if hadFrames {
-						markH264EncoderWorked(encName)
-						h264Timeouts++
-						if h264Timeouts >= 3 {
-							useH264.Store(false)
-							h264FallbackTime = time.Now()
-							h264Timeouts = 0
-							log.Printf("[%s] %s 连续3次超时，暂回退 MJPEG（30s 后重试）", userName, encName)
-						} else {
-							log.Printf("[%s] %s 超时（%d/3），重试同一编码器", userName, encName, h264Timeouts)
-						}
-					} else if tryNextH264Encoder() {
-						continue
-					} else {
+				// 8s 无帧：native 采集仅在桌面变化时产帧，静止属正常，仅当会话已死才处理。
+				if ff != nil && ff.ended() {
+					hadFrames := ff.hasSentFrames()
+					teardownSession()
+					if !hadFrames {
+						log.Printf("[%s] native H.264 8s 无帧且已结束，回退 JPEG", userName)
+						nativeDead = true
 						useH264.Store(false)
-						h264FallbackTime = time.Now()
-						log.Printf("H.264 编码器全部失败，回退 MJPEG")
+						sendFormat("jpeg", q, mw, fps)
+					} else {
+						log.Printf("[%s] native H.264 会话异常结束，将重建会话", userName)
 					}
 				}
 				continue
 			}
 
+			// 正常 H.264 帧投递。
 			now := time.Now()
 			if !lastFrame.IsZero() {
 				w := now.Sub(lastFrame)
@@ -716,84 +670,31 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			totalBytes += len(data)
 			lastFrame = now
 
-			if cacheFrame <= 0 || ffScreen != id {
-				cachedBounds = screenshot.GetDisplayBounds(id)
-				cachedZoom = getScreenZoom(id)
-				cacheFrame = 30
-			}
-			cacheFrame--
+			refreshMeta(id)
 
-			if !ffH264 {
-				data = encodeFrame(int32(cachedBounds.Min.X), int32(cachedBounds.Min.Y),
-					int32(cachedBounds.Dx()), int32(cachedBounds.Dy()), cachedZoom, data)
+			// 双路避让：本用户 WebRTC 已连通并绑定本显示器时，视频走 WebRTC，不再经 WS 推帧。
+			skipWS := false
+			if rtcActive, rtcDisp := userRTCVideoStatus(userName); rtcActive && rtcDisp == id {
+				skipWS = true
 			}
-			if ffH264 {
-				// 非阻塞发送。IDR 丢失仅短暂花屏（GOP=120 下约 0.85s），
-				// 远好过硬背压造成多秒管道卡死。
-				// 双路避让：本用户 WebRTC 已连通并绑定本显示器时，视频走 WebRTC 轨，
-				// 不再经 WS 推二进制帧，避免同一画面双路消耗带宽与解码。
-				skipWS := false
-				if rtcActive, rtcDisp := userRTCVideoStatus(userName); rtcActive && rtcDisp == id {
-					skipWS = true
-				}
-				if !skipWS {
-					select {
-					case outCh <- wsMessage{websocket.BinaryMessage, data}:
-					default:
-					}
-				}
-			} else {
+			if !skipWS {
 				select {
 				case outCh <- wsMessage{websocket.BinaryMessage, data}:
 				default:
 				}
 			}
-
-			// 帧计数：H.264 已按 AUD 帧边界打包，每消息即一帧；MJPEG 同理
 			frames++
-			if elapsed := time.Since(lastStats); elapsed >= time.Second {
-				fps := float64(frames) / elapsed.Seconds()
-				maxW := float64(maxWait.Microseconds()) / 1000
-				maxRate := 60
-				if hasDDAGrab {
-					if r := getDisplayRefreshRate(id); r > 0 {
-						maxRate = r
-					}
-					if px := cachedBounds.Dx() * cachedBounds.Dy(); px > 0 {
-						if c := 700_000_000 / px; maxRate > c {
-							maxRate = c
-						}
-					}
-					if maxRate < 60 {
-						maxRate = 60
-					}
-				}
-				adaptActive, adaptQVal, adaptFpsVal := getAdaptStatus()
-				stat := statsMsg{
-					FPS: math.Round(fps*10) / 10, EncMs: math.Round(maxW*10) / 10,
-					KB: math.Round(float64(totalBytes)/elapsed.Seconds()/102.4) / 10, Owner: controlOwner,
-					Ox: cachedBounds.Min.X, Oy: cachedBounds.Min.Y, Zoom: cachedZoom,
-					Q: q, W: cachedBounds.Dx(), H: cachedBounds.Dy(),
-					Screens: screenshot.NumActiveDisplays(), MaxRate: maxRate,
-					Users:       int(connCount.Load()),
-					AdaptActive: adaptActive,
-					AdaptQ:      adaptQVal,
-					AdaptFPS:    adaptFpsVal,
-				}
-				if b, _ := json.Marshal(stat); b != nil {
-					select {
-					case outCh <- wsMessage{websocket.TextMessage, b}:
-					default:
-					}
-				}
-				frames, totalBytes, totalWait, maxWait, lastStats = 0, 0, 0, 0, time.Now()
-			}
+			flushStats(id, q)
 			continue
 		}
 
-		// ── 纯 Go 回退 ──
-		// 主动限速：MJPEG 模式下无 ffmpeg 帧率控制，限制采集速率
-		// 避免全速运行导致带宽暴涨、前端解码积压
+		// ═══ 纯 Go JPEG 回退 ═══
+		// 从 native H.264 转入（用户关 H.264 / native 产不出帧）时先停会话并切换格式通知。
+		if lastFormatSent != "jpeg" {
+			teardownSession()
+			sendFormat("jpeg", q, mw, fps)
+		}
+		// 主动限速：JPEG 无编码器帧率控制，限制采集速率避免带宽暴涨与解码积压。
 		targetInterval := time.Second / 60
 		if !lastFrame.IsZero() {
 			if d := targetInterval - time.Since(lastFrame); d > 0 {
@@ -801,19 +702,13 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			}
 		}
 		loopStart := time.Now()
-
 		img, err := screenshot.CaptureDisplay(id)
 		if err != nil {
 			time.Sleep(100 * time.Millisecond)
 			lastFrame = time.Time{}
 			continue
 		}
-		if cacheFrame <= 0 {
-			cachedBounds = screenshot.GetDisplayBounds(id)
-			cachedZoom = getScreenZoom(id)
-			cacheFrame = 30
-		}
-		cacheFrame--
+		refreshMeta(id)
 		img = downscale(img, mw)
 		goJpgBuf.Reset()
 		_ = jpeg.Encode(&goJpgBuf, img, &jpeg.Options{Quality: q})
@@ -826,38 +721,12 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 		default:
 		}
 
-		// 统计本迭代耗时（含采集+缩放+编码）
 		iterDuration := time.Since(loopStart)
 		totalWait += iterDuration
 		if iterDuration > maxWait {
 			maxWait = iterDuration
 		}
 		lastFrame = loopStart
-
-		if elapsed := time.Since(lastStats); elapsed >= time.Second {
-			fps := float64(frames) / elapsed.Seconds()
-			maxW := float64(maxWait.Microseconds()) / 1000
-			adaptActive, adaptQVal, adaptFpsVal := getAdaptStatus()
-			stat := statsMsg{
-				FPS: math.Round(fps*10) / 10, EncMs: math.Round(maxW*10) / 10,
-				KB: math.Round(float64(totalBytes)/elapsed.Seconds()/102.4) / 10, Owner: controlOwner,
-				Ox: cachedBounds.Min.X, Oy: cachedBounds.Min.Y, Zoom: cachedZoom,
-				Q: q, W: cachedBounds.Dx(), H: cachedBounds.Dy(),
-				Screens: screenshot.NumActiveDisplays(), MaxRate: 60,
-				Users:       int(connCount.Load()),
-				AdaptActive: adaptActive,
-				AdaptQ:      adaptQVal,
-				AdaptFPS:    adaptFpsVal,
-			}
-			if b, _ := json.Marshal(stat); b != nil {
-				select {
-				case outCh <- wsMessage{websocket.TextMessage, b}:
-				default:
-					{
-					}
-				}
-			}
-			frames, totalBytes, totalWait, maxWait, lastStats = 0, 0, 0, 0, time.Now()
-		}
+		flushStats(id, q)
 	}
 }

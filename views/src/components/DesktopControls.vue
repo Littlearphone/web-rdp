@@ -42,17 +42,7 @@
       <span class="label" style="color:#888">{{ controlTip }}</span>
     </template>
 
-    <!-- 画质 / 分辨率 / 帧率：放开给所有连接用户手动调（不要求控制权；WebRTC 模式也可调） -->
-    <span class="sep">|</span>
-    <span class="label">画质</span>
-    <n-slider
-      v-model:value="store.currentQ"
-      :min="30"
-      :max="100"
-      :step="5"
-      style="width:60px"
-      @update:value="store.sendSettings"
-    />
+    <!-- 分辨率 / 帧率：放开给所有连接用户手动调（不要求控制权） -->
     <span class="sep">|</span>
     <span class="label">分辨率</span>
     <n-select
@@ -72,38 +62,6 @@
         style="width:100px"
         @update:value="onFPSChange"
       />
-    </template>
-
-    <template v-if="isController">
-      <template v-if="store.canH264">
-        <span class="sep">|</span>
-
-        <n-switch
-          v-model:value="store.useH264"
-          size="small"
-          @update:value="onH264Toggle"
-        />
-        <n-tooltip trigger="hover">
-          <template #trigger>
-            <span class="label">节流模式</span>
-          </template>
-          开启：GPU 硬件编码，流量低延迟小<br>关闭：兼容模式，纯软件编码
-        </n-tooltip>
-      </template>
-
-      <!-- 自适应偏好：仅 H.264 模式生效 -->
-      <template v-if="store.streamFormat === 'h264'">
-        <span class="sep">|</span>
-        <n-tooltip trigger="hover">
-          <template #trigger>
-            <span
-              class="adapt-mode-btn"
-              @click="toggleAdaptMode"
-            >当前为 {{ store.adaptMode === 'smooth' ? '⚡流畅' : '🎨画质' }} 模式</span>
-          </template>
-          单击切换：<br>🎨画质 → 优先降帧率保画质<br>⚡流畅 → 优先降画质保帧率
-        </n-tooltip>
-      </template>
     </template>
 
     <!-- 动态数据 -->
@@ -153,7 +111,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue';
-import { NSelect, NSlider, NSwitch, NTooltip, NModal, NInput, NButton, useNotification } from 'naive-ui';
+import { NSelect, NSwitch, NTooltip, NModal, NInput, NButton, useNotification } from 'naive-ui';
 import { useAppStore } from '@/stores/app';
 import { buildResolutions, buildFPSOptions } from '@/composables/useResolutionOptions';
 import { useWebSocket } from '@/composables/useWebSocket';
@@ -161,9 +119,6 @@ import { useWebSocket } from '@/composables/useWebSocket';
 const store = useAppStore();
 const { connect } = useWebSocket();
 const notification = useNotification();
-
-/** 当前用户是否为控制者（控制权/输入相关开关仍仅控制者可见） */
-const isController = computed(() => store.statsOwner === store.statsUser);
 
 /** 带宽显示：自动选择 KB/s 或 MB/s */
 const bwText = computed(() => {
@@ -282,29 +237,6 @@ function onControlToggle(v: boolean) {
     store.send({ control: false });
   }
 }
-
-function onH264Toggle(v: boolean) {
-  store.useH264 = v;
-  store.sendSettings();
-}
-
-function toggleAdaptMode() {
-  store.adaptMode = store.adaptMode === 'smooth' ? 'quality' : 'smooth';
-  store.send({ adapt_mode: store.adaptMode });
-}
-
-  // WebRTC 模式下自动拉满参数，让 GCC + 自适应全权接管。
-  // 仅 WebRTC 触发的拉满，WS 模式保留用户手动控制。
-  // fps 设为 0（自动检测）而非硬编码 maxRate：各显示器独立 auto-detect，
-  // 主屏 141Hz / 副屏 60Hz 各自正确，不会互相污染。
-  watch(() => store.webrtcActive, (active) => {
-    if (!active || store.streamFormat !== 'h264') return;
-    let changed = false;
-    if (store.currentQ !== 100) { store.currentQ = 100; changed = true; }
-    if (store.currentMW !== 0) { store.currentMW = 0; changed = true; }
-    if (store.currentFPS !== 0) { store.currentFPS = 0; changed = true; }
-    if (changed) store.sendSettings();
-  });
 
 const showEditNameDialog = ref(false);
 const editTempName = ref('');

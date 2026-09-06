@@ -25,7 +25,6 @@ import (
 	"math/big"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -54,25 +53,6 @@ func (f *tlsLogFilter) Write(p []byte) (int, error) {
 
 //go:embed static
 var staticFS embed.FS
-
-// httpClient 是全局复用的 HTTP 客户端，用于下载 ffmpeg 等网络请求
-var httpClient *http.Client
-
-// initHTTPClient 初始化全局 HTTP 客户端，支持可选的 HTTP 代理
-func initHTTPClient(proxy string) {
-	tr := &http.Transport{
-		TLSHandshakeTimeout:   15 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
-		ForceAttemptHTTP2:     true,
-	}
-	if proxy != "" {
-		if u, err := url.Parse("http://" + proxy); err == nil {
-			tr.Proxy = http.ProxyURL(u)
-			fmt.Printf("使用代理: %s\n", proxy)
-		}
-	}
-	httpClient = &http.Client{Timeout: 5 * time.Minute, Transport: tr}
-}
 
 // ── Windows API 绑定 ──
 // 通过 syscall.NewLazyDLL 延迟加载 user32.dll，避免不必要的 DLL 加载
@@ -659,7 +639,7 @@ type statsMsg struct {
 }
 
 // main 是程序入口，负责解析命令行参数、初始化组件并启动 HTTP 服务器。
-// 主要流程：解析参数 → 设置 DPI → 初始化 HTTP 客户端 → 检测 ffmpeg → 检测编码器 → 启动服务
+// 主要流程：解析参数 → 设置 DPI → 初始化 native(MF) 后端与 WebRTC → 启动服务
 // ── 证书持久化 ──
 
 // loadCertFromDisk 从磁盘加载 PEM 证书和私钥。
@@ -752,35 +732,28 @@ func generateSelfSignedCert() (tls.Certificate, []byte, []byte) {
 
 func main() {
 	var (
-		proxy     string // HTTP 代理地址
-		port      int    // 监听端口
-		listen    string // 监听地址
-		ffmpegArg string // 手动指定的 ffmpeg 路径
-		useTLS    bool   // 是否启用 HTTPS（自动生成自签名证书）
-		password  string // 访问密码
-		probeNative bool // 仅运行进程内编码后端探测后退出
-		mfEncode    bool // 仅运行单帧 MF H.264 编码冒烟后退出
-		nativeEncode bool // H.264 推流用进程内 native(MF) 编码会话，替代 ffmpeg
+		port        int    // 监听端口
+		listen      string // 监听地址
+		useTLS      bool   // 是否启用 HTTPS（自动生成自签名证书）
+		password    string // 访问密码
+		probeNative bool   // 仅运行进程内编码后端探测后退出
+		mfEncode    bool   // 仅运行单帧 MF H.264 编码冒烟后退出
 	)
-	flag.StringVar(&proxy, "proxy", "", "HTTP 代理地址 (用于下载 ffmpeg)")
 	flag.IntVar(&port, "port", 9000, "监听端口")
 	flag.StringVar(&listen, "listen", "", "监听地址 (默认所有网卡)")
-	flag.StringVar(&ffmpegArg, "ffmpeg", "", "手动指定 ffmpeg.exe 路径")
 	flag.BoolVar(&useTLS, "tls", true, "启用 HTTPS，-tls=false 禁用（自签名证书，局域网 H.264 需要）")
 	flag.StringVar(&password, "password", "", "访问密码（空=随机生成，0=无需密码）")
 	flag.BoolVar(&probeNative, "probe-native", false, "仅探测进程内编码后端（MF/GPU）并退出，不启动服务")
 	flag.BoolVar(&mfEncode, "mf-encode", false, "仅运行单帧 MF H.264 编码冒烟（头less）并退出")
-	flag.BoolVar(&nativeEncode, "native-encode", false, "H.264 推流走进程内 native(MF) 编码会话（默认仍 ffmpeg）")
 	flag.Usage = func() {
 		o := flag.CommandLine.Output()
 		fmt.Fprintf(o, "Web 远程控制 v1.0\n\n用法: %s [选项]\n\n选项:\n", os.Args[0])
 		flag.PrintDefaults()
-		fmt.Fprint(o, "\n示例:\n  web-rdp.exe                                    默认 HTTPS :9000\n  web-rdp.exe -port 8080                          指定端口\n  web-rdp.exe -listen 127.0.0.1                   仅本机\n  web-rdp.exe -ffmpeg C:\\tools\\ffmpeg.exe         手动指定 ffmpeg\n  web-rdp.exe -proxy :7890                        走代理下载\n  web-rdp.exe -tls=false                          禁用 HTTPS，回退 HTTP\n")
+		fmt.Fprint(o, "\n示例:\n  web-rdp.exe                                    默认 HTTPS :9000\n  web-rdp.exe -port 8080                          指定端口\n  web-rdp.exe -listen 127.0.0.1                   仅本机\n  web-rdp.exe -tls=false                          禁用 HTTPS，回退 HTTP\n  web-rdp.exe -probe-native                       探测进程内 MF/GPU 编码后端\n  web-rdp.exe -mf-encode                          单帧 MF H.264 编码冒烟\n")
 	}
 	flag.Parse()
 
 	// ── 仅探测模式：输出进程内编码后端可用性后退出 ──
-	// 用于在无 ffmpeg / 有真实 GPU 的机器上验证 native 后端（阶段一降级验证入口）。
 	if probeNative {
 		fmt.Println("=== 进程内编码后端探测 ===")
 		native.Probe()
@@ -844,30 +817,11 @@ func main() {
 		fmt.Printf("→ 自签名证书已保存 (%s)\n", appDir)
 	}
 
-	if ffmpegArg != "" {
-		ffmpegPath = ffmpegArg
-		hasDDAGrab = checkDDAGrab(ffmpegArg)
-		useFFmpeg = true
-		fmt.Printf("使用指定 ffmpeg: %s\n", ffmpegArg)
-	}
-
 	_, _, _ = procSetProcessDPIAware.Call() // 设置进程 DPI 感知，避免高 DPI 下坐标偏移
-	initHTTPClient(proxy)
-	if ffmpegArg == "" {
-		detectFFmpeg() // 自动检测或下载 ffmpeg
-	}
-	detectH264Encoder() // 按 GPU 品牌选择最优 H.264 编码器
-	if nativeEncode {
-		// H.264 推流走进程内 native(MF) 编码会话。
-		nativeEncodeRequested = true
-		currentSessionPool.forceNative = true
-		fmt.Println("→ H.264 使用进程内 native(MF) 编码会话")
-		if !nativeH264Ready() {
-			log.Printf("⚠ native MF H.264 不可用，将回退到 ffmpeg 路径")
-			currentSessionPool.forceNative = false
-		}
-	}
-	initWebRTC()        // 初始化 WebRTC（全局视频轨 + 信令管理）
+
+	// H.264 唯一来源是进程内 native(MF) 编码（硬件异步 MFT 优先，软件 MF 回退）。
+	// currentSessionPool 已默认指向 nativePool，无需门控/下载，也不用检测外部 ffmpeg。
+	initWebRTC() // 初始化 WebRTC（全局视频轨 + 信令管理）
 
 	// ── 静态文件服务（嵌入的 HTML/JS/CSS）──
 	sub, _ := fs.Sub(staticFS, "static")

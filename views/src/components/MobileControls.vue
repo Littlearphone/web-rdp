@@ -11,17 +11,6 @@
           @click="cycleScreen"
         >{{ store.screenCount > 1 ? `屏${store.currentScreen}` : '主屏' }}</span>
 
-        <!-- 画质按钮组 -->
-        <span class="ctrl-group">
-          <span
-            v-for="q in qualityOptions"
-            :key="q.value"
-            class="ctrl-btn"
-            :class="{ active: store.currentQ === q.value }"
-            @click="setQuality(q.value)"
-          >{{ q.label }}</span>
-        </span>
-
         <!-- 分辨率按钮组 -->
         <span class="ctrl-group">
           <span
@@ -38,20 +27,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue';
+import { ref, watch } from 'vue';
 import { useAppStore } from '@/stores/app';
 import { buildResolutions } from '@/composables/useResolutionOptions';
 import StatsDisplay from './StatsDisplay.vue';
 import type { ResolutionOption } from '@/types';
 
 const store = useAppStore();
-
-// ── 画质选项 ──
-const qualityOptions = [
-  { label: '低', value: 40 },
-  { label: '中', value: 60 },
-  { label: '高', value: 80 },
-];
 
 // ── 分辨率选项（响应式更新） ──
 const currentResOpts = ref<ResolutionOption[]>([]);
@@ -66,16 +48,6 @@ function updateResOptions() {
 
 watch([() => store.basePw, () => store.basePh], updateResOptions, { immediate: true });
 
-// H.264/WebRTC 模式下自动拉满参数
-watch(() => store.webrtcActive, (active) => {
-  if (active && store.streamFormat === 'h264') {
-    let changed = false;
-    if (store.currentQ !== 100) { store.currentQ = 100; changed = true; }
-    if (store.currentMW !== 0) { store.currentMW = 0; changed = true; }
-    if (changed) store.sendSettings();
-  }
-});
-
 // ── 操作 ──
 function cycleScreen() {
   if (store.screenCount > 1) {
@@ -84,11 +56,6 @@ function cycleScreen() {
     store.lastResKey = '';
     store.send({ screen: store.currentScreen, maxw: 0 });
   }
-}
-
-function setQuality(v: number) {
-  store.currentQ = v;
-  store.sendSettings();
 }
 
 function setResolution(w: number) {

@@ -40,7 +40,8 @@ jobs:
 
       - name: 构建后端 (exe)
         run: |
-          go build -ldflags "-s -w" -o web-rdp.exe .
+          cd backend
+          go build -trimpath -ldflags "-s -w" -o ../web-rdp.exe .
 
       - name: 上传构建产物 (Artifact)
         uses: actions/upload-artifact@v4
