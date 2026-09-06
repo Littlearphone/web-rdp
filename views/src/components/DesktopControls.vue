@@ -59,7 +59,7 @@
       v-model:value="store.currentMW"
       :options="resOptions"
       size="tiny"
-      style="width:90px"
+      style="width:112px"
       @update:value="store.sendSettings"
     />
 

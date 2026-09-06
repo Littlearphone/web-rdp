@@ -25,14 +25,16 @@ export function buildResolutions(pw: number, ph: number, isMobile: boolean): Res
   }
 
   const opts: ResolutionOption[] = [
-    { label: '原始', value: 0, w: 0 },
+    // 原始/全分辨率：显示实际像素尺寸而非"原始"字样
+    { label: `${bp}×${bh}`, value: 0, w: 0 },
   ];
   for (const t of [1080, 720, 480]) {
     if (t >= bh) continue;
+    const w = Math.round(bp * t / bh);
     opts.push({
-      label: `${t}p`,
-      value: Math.round(bp * t / bh),
-      w: Math.round(bp * t / bh),
+      label: `${w}×${t}`,
+      value: w,
+      w,
     });
   }
   return opts;
@@ -49,12 +51,12 @@ export function basePh(ph: number): number {
 }
 
 /** 生成 FPS 选项（仅 ddagrab 模式可见）。
- *  上限取屏幕刷新率或 144 的较低值，向下排列多档帧率。 */
+ *  上限取屏幕刷新率或 144 的较低值，向下排列多档帧率。首项为"自动"=0。 */
 export function buildFPSOptions(maxRate: number): { label: string; value: number }[] {
   const upper = Math.min(maxRate, 144);
   const tiers = [upper, 120, 90, 60, 30, 15];
   const seen = new Set<number>();
-  const opts: { label: string; value: number }[] = [];
+  const opts: { label: string; value: number }[] = [{ label: '自动', value: 0 }];
   for (const r of tiers) {
     if (r <= upper && r >= 15 && !seen.has(r)) {
       seen.add(r);
