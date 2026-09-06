@@ -8,6 +8,15 @@ import (
 	"web-rdp/native"
 )
 
+// nv12Enc 统一进程内 H.264 编码器（硬件异步 MF 或软件同步 MF），逐帧同步契约。
+type nv12Enc interface {
+	Encode(nv12 []byte) ([]byte, error)
+	Close()
+}
+
+// VerboseNative 控制 native 产帧会话的诊断日志（编码后端选择等）。
+var VerboseNative = false
+
 // ── nativeSession：满足 streamer 契约的进程内 MF 编码会话 ──
 //
 // 以 goroutine 持续做 DXGI 直捕 → NV12 → MFH264Encoder（逐帧）→ fan-out 到订阅者。
@@ -159,8 +168,9 @@ func (s *nativeSession) produce() {
 	}
 	defer capture.Close()
 
-	// 编码器首帧按采集尺寸初始化（偶数）。
-	var enc *native.MFH264Encoder
+	// 编码器：硬件异步 MFT 优先，初始化失败则回退软件同步 MF。
+	var enc nv12Enc
+	var encName string
 	var tw, th int
 	consecErr := 0 // 连续编码错误计数：超过阈值退出，避免空转打满 CPU/内存
 
@@ -219,15 +229,34 @@ func (s *nativeSession) produce() {
 			if th%2 != 0 {
 				th--
 			}
+			// 硬件 MFT 按 16×16 宏块处理，需对齐到 16 的倍数，否则编码时越界崩溃。
+			tw -= tw % 16
+			th -= th % 16
 			if tw <= 0 || th <= 0 {
 				continue
 			}
 			// 码率随分辨率与画质估算，避免固定低码率导致模糊。
 			br := native.EstimateBitrateForQuality(tw, th, s.quality)
-			enc, err = native.NewMFH264EncoderQ(tw, th, 30, br)
-			if err != nil {
-				log.Printf("[native] MFH264Encoder 初始化失败: %v", err)
-				return
+			// 硬件异步 MFT 优先（跨厂商，系统自带；低每帧开销、高帧率）。
+			hw, hwerr := native.NewAsyncMFH264Encoder(tw, th, br)
+			if hwerr == nil {
+				enc = hw
+				encName = "hardware-async-MF"
+			} else {
+				// 无硬件 MFT 或初始化失败 → 回退软件 MF 编码器。
+				sw, swerr := native.NewMFH264EncoderQ(tw, th, 30, br)
+				if swerr != nil {
+					log.Printf("[native] 硬件(%v)与软件(%v)编码器均初始化失败", hwerr, swerr)
+					return
+				}
+				enc = sw
+				encName = "software-sync-MF"
+				if VerboseNative {
+					log.Printf("[native] 硬件编码器不可用(%v)，回退软件 MF", hwerr)
+				}
+			}
+			if VerboseNative {
+				log.Printf("[native] 编码后端=%s %dx%d", encName, tw, th)
 			}
 			s.width = tw
 			s.height = th
