@@ -199,6 +199,8 @@ func (s *nativeSession) produce() {
 	isPush := false           // 硬件异步编码器走 Push/Next 流水线
 	feedN := 0                // 已入队(喂)帧计数，用于核对采集/入队是否跟上
 	feedT := time.Now()       // 入队统计起点
+	var acqTotal time.Duration // AcquireBGRA 累计耗时
+	var acqN int               // AcquireBGRA 调用次数
 
 	for {
 		// 无订阅者时不必采集/编码，省 CPU 且避免空转；但需快速响应 stop。
@@ -223,6 +225,7 @@ func (s *nativeSession) produce() {
 		default:
 		}
 
+		acqStart := time.Now()
 		bgra, cw, ch, err := capture.AcquireBGRA(2000)
 		if err != nil {
 			log.Printf("[native] AcquireBGRA: %v", err)
@@ -232,6 +235,8 @@ func (s *nativeSession) produce() {
 		if bgra == nil {
 			continue // 超时无新帧（桌面静止）
 		}
+		acqTotal += time.Since(acqStart)
+		acqN++
 		if cw <= 0 || ch <= 0 {
 			continue
 		}
@@ -339,8 +344,9 @@ func (s *nativeSession) produce() {
 		}
 		lastProduce = time.Now()
 		if isPush && feedN > 0 && time.Since(feedT) >= 3*time.Second {
-			log.Printf("[native] 入队(喂) %.1f fps @ %dx%d (target=%d)", float64(feedN)/time.Since(feedT).Seconds(), s.width, s.height, s.fps)
-			feedN, feedT = 0, time.Now()
+			avgAcq := float64(acqTotal.Milliseconds()) / float64(max(acqN, 1))
+			log.Printf("[native] 入队(喂) %.1f fps @ %dx%d (target=%d) 采集平均%.1fms/帧 采到%d帧", float64(feedN)/time.Since(feedT).Seconds(), s.width, s.height, s.fps, avgAcq, acqN)
+			feedN, feedT, acqTotal, acqN = 0, time.Now(), 0, 0
 		}
 	}
 }
