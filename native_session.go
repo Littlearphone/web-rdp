@@ -166,10 +166,26 @@ func (s *nativeSession) fanout(frame []byte) {
 func (s *nativeSession) produce() {
 	defer s.wg.Done()
 
-	capture, err := native.NewDesktopCapture(s.display)
-	if err != nil {
-		log.Printf("[native] 桌面直捕打开失败: %v", err)
-		return
+	// 打开桌面采集。重启/切换场景下旧会话可能尚未释放同一显示器的 DXGI 采集
+	// (DuplicateOutput 一次只允许一个)，故失败时带退避重试，等旧采集释放后接管，
+	// 避免新会话因撞车而空白/冻结，也是消除崩溃的关键。
+	var capture *native.DesktopCapture
+	var derr error
+	deadline := time.Now().Add(6 * time.Second)
+	for {
+		capture, derr = native.NewDesktopCapture(s.display)
+		if derr == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			log.Printf("[native] 桌面直捕打开失败: %v", derr)
+			return
+		}
+		select {
+		case <-s.stopCh:
+			return
+		case <-time.After(120 * time.Millisecond):
+		}
 	}
 	defer capture.Close()
 
