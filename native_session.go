@@ -200,13 +200,16 @@ func (s *nativeSession) produce() {
 			continue
 		}
 		// 首次初始化编码器（偶数目标尺寸）。
-		// 尺寸策略：maxW>0 时按它缩（前端分辨率控制）；maxW<=0 时用源分辨率。
-		// 输出缓冲已按分辨率动态放大，软件 MF 可处理高达 3440x1440。
+		// 尺寸策略：前端 maxW>0 时按它；否则默认压到 1920 宽以内，
+		// 避免 4K 源 编码/NV12 每帧 11ms+ 导致 fps 上不去。1920 在多数屏上足够清晰。
 		if enc == nil {
 			tw = cw
 			th = ch
 			maxTarget := s.maxW
-			if maxTarget > 0 && tw > maxTarget {
+			if maxTarget <= 0 {
+				maxTarget = 1920
+			}
+			if tw > maxTarget {
 				tw = maxTarget
 				th = ch * tw / cw
 			}
