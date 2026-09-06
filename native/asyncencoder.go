@@ -185,6 +185,29 @@ func (e *asyncMFEncoder) feedOne(nv12 []byte) error {
 	return e2
 }
 
+// Push 非阻塞入队一帧待编码（供流式/流水线路径使用，避免每帧同步等输出）。
+// feedCh 满时丢弃该帧（返回 false，调用方视为跳帧），绝不让采集/产帧被编码器反压阻塞。
+func (e *asyncMFEncoder) Push(nv12 []byte) bool {
+	select {
+	case e.feedCh <- nv12:
+		return true
+	default:
+		return false
+	}
+}
+
+// Next 阻塞取下一帧编码输出。配合 Push 用：产帧只 Push，投递由独立 goroutine 取 Next。
+func (e *asyncMFEncoder) Next() ([]byte, error) {
+	select {
+	case out := <-e.outCh:
+		return out, nil
+	case err := <-e.errCh:
+		return nil, err
+	case <-e.stop:
+		return nil, errors.New("编码器已停止")
+	}
+}
+
 // Encode 喂入一帧 NV12，阻塞等待其编码输出返回（同步契约）。
 func (e *asyncMFEncoder) Encode(nv12 []byte) ([]byte, error) {
 	e.mu.Lock()

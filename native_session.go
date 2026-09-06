@@ -177,8 +177,10 @@ func (s *nativeSession) produce() {
 	var enc nv12Enc
 	var encName string
 	var tw, th int
-	var lastSend time.Time // 上次发送帧的时刻，用于按真实间隔给 RTP 时长
-	consecErr := 0         // 连续编码错误计数：超过阈值退出，避免空转打满 CPU/内存
+	var lastSend time.Time    // 投递帧时刻（投递 goroutine 更新），用于 RTP 时长
+	var lastProduce time.Time // 节流用：采集/入队节奏
+	consecErr := 0            // 连续编码错误计数：超过阈值退出，避免空转打满 CPU/内存
+	isPush := false           // 硬件异步编码器走 Push/Next 流水线
 
 	for {
 		// 无订阅者时不必采集/编码，省 CPU 且避免空转；但需快速响应 stop。
@@ -246,6 +248,11 @@ func (s *nativeSession) produce() {
 			if hwerr == nil {
 				enc = hw
 				encName = "hardware-async-MF"
+				isPush = true
+				// 硬件流式编码器：独立投递 goroutine 取输出，采集 goroutine 只 Push，
+				// 二者解耦→编码器可流水线化，避免每帧同步等输出把 fps 压死。
+				s.wg.Add(1)
+				go s.pushDeliver(hw, &lastSend)
 			} else {
 				// 无硬件 MFT 或初始化失败 → 回退软件 MF 编码器。
 				sw, swerr := native.NewMFH264EncoderQ(tw, th, 30, br)
@@ -259,9 +266,8 @@ func (s *nativeSession) produce() {
 					log.Printf("[native] 硬件编码器不可用(%v)，回退软件 MF", hwerr)
 				}
 			}
-			if VerboseNative {
-				log.Printf("[native] 编码后端=%s %dx%d", encName, tw, th)
-			}
+			// 记录每次编码器/分辨率选择的实际尺寸（始终打印，便于对照前端实际收到的分辨率）
+			log.Printf("[native] 编码后端=%s 源=%dx%d 编码=%dx%d maxW=%d targetFPS=%d", encName, cw, ch, tw, th, s.maxW, s.fps)
 			s.width = tw
 			s.height = th
 		}
@@ -274,39 +280,77 @@ func (s *nativeSession) produce() {
 			small = native.DownscaleBGRA(bgra, cw, ch, tw, th)
 		}
 		nv12 := native.BGRAToNV12(small, tw, th)
-		frame, err := enc.Encode(nv12)
-		if err != nil {
-			consecErr++
-			if consecErr > 30 {
-				// 编码器持续失败（状态坏了），退出避免每 20ms 空转打满 CPU/内存。
-				log.Printf("[native] 编码连续失败 %d 次(%v)，退出产帧循环", consecErr, err)
-				enc.Close()
-				return
+		if isPush {
+			// 流水线：非阻塞入队。编码器繁忙(队列满)则丢帧保新，避免反向背压阻塞采集。
+			hw, _ := enc.(pushH264)
+			hw.Push(nv12)
+		} else {
+			frame, e2 := enc.Encode(nv12)
+			if e2 != nil {
+				consecErr++
+				if consecErr > 30 {
+					// 编码器持续失败（状态坏了），退出避免空转打满 CPU/内存。
+					log.Printf("[native] 编码连续失败 %d 次(%v)，退出产帧循环", consecErr, e2)
+					enc.Close()
+					return
+				}
+				log.Printf("[native] MF 编码: %v", e2)
+				timeSleepMs(50) // 退避，别高频空转
+				continue
 			}
-			log.Printf("[native] MF 编码: %v", err)
-			timeSleepMs(50) // 退避，别高频空转
-			continue
+			consecErr = 0 // 成功则清零
+			if len(frame) > 0 {
+				// 按真实帧间隔给 RTP 时长，让时间戳与真实时间对齐，避免播放缓冲累积。
+				dur := measuredFrameDur(&lastSend)
+				s.fanout(frame)
+				writeWebRTCSample(s.display, frame, dur)
+			}
 		}
-		consecErr = 0 // 成功则清零
-		if len(frame) > 0 {
-			s.fanout(frame)
-			// 按真实帧间隔给 RTP 时长：硬件路径按采集速度推帧，若固定用 33ms(30fps)
-			// 会造成"时间戳比真实时间走得慢"→ 浏览器播放缓冲持续累积 → 延迟递增、
-			// 显示帧率下降。用实测间隔做 Duration 让 RTP 时间戳与真实时间对齐，消除漂移。
-			dur := measuredFrameDur(&lastSend)
-			writeWebRTCSample(s.display, frame, dur)
-		}
-		// 节流：软件编码器慢，需 20ms 保护避免积压；硬件按目标帧率 s.fps 节流上限，
+		// 节流：软件编码器慢，20ms 保护；硬件按目标帧率 s.fps 限制采集/入队速率，
 		// 让"帧率选择"真正影响投递速率（画面活动时最多按所选 fps 产帧）。
 		if encName == "software-sync-MF" {
 			timeSleepMs(20)
 			continue
 		}
 		target := time.Second / time.Duration(s.fps)
-		if since := time.Since(lastSend); since < target {
-			time.Sleep(target - since)
+		if !lastProduce.IsZero() {
+			if since := time.Since(lastProduce); since < target {
+				time.Sleep(target - since)
+			}
+		}
+		lastProduce = time.Now()
+	}
+}
+
+// pushDeliver 独立 goroutine：从硬件异步编码器持续取编码输出并投递(fanout + WebRTC)。
+// 采集 goroutine 只 Push，二者解耦，让编码器内部流水线化以支撑高帧率。
+func (s *nativeSession) pushDeliver(pe pushH264, last *time.Time) {
+	defer s.wg.Done()
+	frames := 0
+	start := time.Now()
+	for {
+		b, err := pe.Next()
+		if err != nil {
+			return // 编码器已停止或致命错误
+		}
+		if len(b) == 0 {
+			continue
+		}
+		frames++
+		dur := measuredFrameDur(last)
+		s.fanout(b)
+		writeWebRTCSample(s.display, b, dur)
+		if time.Since(start) >= 3*time.Second {
+			log.Printf("[native] 投递 %.1f fps @ %dx%d (target=%d)", float64(frames)/time.Since(start).Seconds(), s.width, s.height, s.fps)
+			frames, start = 0, time.Now()
 		}
 	}
+}
+
+// pushH264 硬件异步编码器的流水线接口（Push 非阻塞入队 + Next 阻塞取输出）。
+type pushH264 interface {
+	Push(nv12 []byte) bool
+	Next() ([]byte, error)
 }
 
 // measuredFrameDur 计算距上次发送的实测间隔作为本帧 RTP 时长，并更新 last。
