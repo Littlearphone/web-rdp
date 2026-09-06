@@ -197,6 +197,8 @@ func (s *nativeSession) produce() {
 	var lastProduce time.Time // 节流用：采集/入队节奏
 	consecErr := 0            // 连续编码错误计数：超过阈值退出，避免空转打满 CPU/内存
 	isPush := false           // 硬件异步编码器走 Push/Next 流水线
+	feedN := 0                // 已入队(喂)帧计数，用于核对采集/入队是否跟上
+	feedT := time.Now()       // 入队统计起点
 
 	for {
 		// 无订阅者时不必采集/编码，省 CPU 且避免空转；但需快速响应 stop。
@@ -251,9 +253,8 @@ func (s *nativeSession) produce() {
 			if th%2 != 0 {
 				th--
 			}
-			// 硬件 MFT 按 16×16 宏块处理，需对齐到 16 的倍数，否则编码时越界崩溃。
-			tw -= tw % 16
-			th -= th % 16
+			// 硬件编码器只要求偶数(NV12/宏块内部自衬垫)；16 对齐非必需，且会让 1080p 源
+			// 触发无谓的近 1:1 downscale(1080→1072)白耗 CPU。只做偶数对齐。
 			if tw <= 0 || th <= 0 {
 				continue
 			}
@@ -299,7 +300,9 @@ func (s *nativeSession) produce() {
 		if isPush {
 			// 流水线：非阻塞入队。编码器繁忙(队列满)则丢帧保新，避免反向背压阻塞采集。
 			hw, _ := enc.(pushH264)
-			hw.Push(nv12)
+			if hw.Push(nv12) {
+				feedN++
+			}
 		} else {
 			frame, e2 := enc.Encode(nv12)
 			if e2 != nil {
@@ -335,6 +338,10 @@ func (s *nativeSession) produce() {
 			}
 		}
 		lastProduce = time.Now()
+		if isPush && feedN > 0 && time.Since(feedT) >= 3*time.Second {
+			log.Printf("[native] 入队(喂) %.1f fps @ %dx%d (target=%d)", float64(feedN)/time.Since(feedT).Seconds(), s.width, s.height, s.fps)
+			feedN, feedT = 0, time.Now()
+		}
 	}
 }
 
