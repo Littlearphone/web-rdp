@@ -89,6 +89,18 @@ func (f *ffSession) stop() {
 	}
 }
 
+// ── 访问器：让 ffSession 满足干净的外部接口（streamer），
+//    避免调用方直接读内部字段。这些仅供接口契约使用，不改变既有逻辑。──
+
+// hasSentFrames 报告该会话是否成功送出过至少一帧。
+func (f *ffSession) hasSentFrames() bool { return f.sentFrames }
+
+// sourceDisplay 返回本会话绑定的显示器 ID。
+func (f *ffSession) sourceDisplay() int { return f.display }
+
+// h264Mode 返回本会话是否为 H.264 编码。
+func (f *ffSession) h264Mode() bool { return f.isH264 }
+
 // acquireFFmpeg 获取或创建指定显示器的 ffmpeg 会话。
 // 如果参数匹配现有会话则复用（引用计数+1），否则停止旧会话并创建新会话。
 // h264 决定编码格式，fps 为手动帧率（0=自动检测，仅 ddagrab 模式生效）。

@@ -35,6 +35,8 @@ import (
 	"time"
 	"unsafe"
 
+	"web-rdp/native"
+
 	"github.com/gorilla/websocket"
 )
 
@@ -756,6 +758,9 @@ func main() {
 		ffmpegArg string // 手动指定的 ffmpeg 路径
 		useTLS    bool   // 是否启用 HTTPS（自动生成自签名证书）
 		password  string // 访问密码
+		probeNative bool // 仅运行进程内编码后端探测后退出
+		mfEncode    bool // 仅运行单帧 MF H.264 编码冒烟后退出
+		nativeEncode bool // H.264 推流用进程内 native(MF) 编码会话，替代 ffmpeg
 	)
 	flag.StringVar(&proxy, "proxy", "", "HTTP 代理地址 (用于下载 ffmpeg)")
 	flag.IntVar(&port, "port", 9000, "监听端口")
@@ -763,6 +768,9 @@ func main() {
 	flag.StringVar(&ffmpegArg, "ffmpeg", "", "手动指定 ffmpeg.exe 路径")
 	flag.BoolVar(&useTLS, "tls", true, "启用 HTTPS，-tls=false 禁用（自签名证书，局域网 H.264 需要）")
 	flag.StringVar(&password, "password", "", "访问密码（空=随机生成，0=无需密码）")
+	flag.BoolVar(&probeNative, "probe-native", false, "仅探测进程内编码后端（MF/GPU）并退出，不启动服务")
+	flag.BoolVar(&mfEncode, "mf-encode", false, "仅运行单帧 MF H.264 编码冒烟（头less）并退出")
+	flag.BoolVar(&nativeEncode, "native-encode", false, "H.264 推流走进程内 native(MF) 编码会话（默认仍 ffmpeg）")
 	flag.Usage = func() {
 		o := flag.CommandLine.Output()
 		fmt.Fprintf(o, "Web 远程控制 v1.0\n\n用法: %s [选项]\n\n选项:\n", os.Args[0])
@@ -770,6 +778,30 @@ func main() {
 		fmt.Fprint(o, "\n示例:\n  web-rdp.exe                                    默认 HTTPS :9000\n  web-rdp.exe -port 8080                          指定端口\n  web-rdp.exe -listen 127.0.0.1                   仅本机\n  web-rdp.exe -ffmpeg C:\\tools\\ffmpeg.exe         手动指定 ffmpeg\n  web-rdp.exe -proxy :7890                        走代理下载\n  web-rdp.exe -tls=false                          禁用 HTTPS，回退 HTTP\n")
 	}
 	flag.Parse()
+
+	// ── 仅探测模式：输出进程内编码后端可用性后退出 ──
+	// 用于在无 ffmpeg / 有真实 GPU 的机器上验证 native 后端（阶段一降级验证入口）。
+	if probeNative {
+		fmt.Println("=== 进程内编码后端探测 ===")
+		native.Probe()
+		fmt.Println("=== 探测结束 ===")
+		return
+	}
+
+	// ── 单帧 MF H.264 编码冒烟（头less，无浏览器/推流窗口）──
+	// 验证进程内 Media Foundation 硬件编码会话端到端：NV12 → Annex B。
+	if mfEncode {
+		fmt.Println("=== 单帧 MF H.264 编码冒烟 ===")
+		native.Verbose = true
+		data, info, err := native.EncodeSingleFrameSmoke(0, 0)
+		if err != nil {
+			fmt.Printf("✗ 编码失败: %v\n", err)
+			return
+		}
+		fmt.Printf("✓ 编码成功: %s\n", info)
+		fmt.Printf("  首 16 字节: % X\n", data[:min(16, len(data))])
+		return
+	}
 
 	// ── 密码初始化 ──
 	if password == "0" {
@@ -825,6 +857,16 @@ func main() {
 		detectFFmpeg() // 自动检测或下载 ffmpeg
 	}
 	detectH264Encoder() // 按 GPU 品牌选择最优 H.264 编码器
+	if nativeEncode {
+		// H.264 推流走进程内 native(MF) 编码会话。
+		nativeEncodeRequested = true
+		currentSessionPool.forceNative = true
+		fmt.Println("→ H.264 使用进程内 native(MF) 编码会话")
+		if !nativeH264Ready() {
+			log.Printf("⚠ native MF H.264 不可用，将回退到 ffmpeg 路径")
+			currentSessionPool.forceNative = false
+		}
+	}
 	initWebRTC()        // 初始化 WebRTC（全局视频轨 + 信令管理）
 
 	// ── 静态文件服务（嵌入的 HTML/JS/CSS）──

@@ -53,7 +53,7 @@ func userNameFor(ip string) string {
 // 启动后持续读取控制消息并截屏推流，支持 MJPEG / H.264 双编码格式动态切换。
 // 当连接断开或 ffmpeg 异常退出时自动清理资源。
 func handleWS(conn *websocket.Conn, r *http.Request) {
-	var ff *ffSession
+	var ff streamer // 编码会话（经 streamPool 获取；默认 ffmpeg provider，可切换 native）
 	var useH264 atomic.Bool // H.264 优先，原子操作避免 data race
 	var curScreen int = -1
 	var subID int
@@ -96,7 +96,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 		log.Printf("[%s] 已断开  在线 %d 人", userName, connCount.Load())
 		if ff != nil {
 			ff.unsubscribe(subID)
-			releaseFFmpeg(curScreen)
+			currentSessionPool.get().release(curScreen)
 		}
 		releaseControl(userName)
 		removeRTCSession(userName) // 清理 WebRTC PeerConnection
@@ -163,7 +163,8 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 	}
 
 	// ── 发送用户名 + 编码格式 ──
-	useH264.Store(currentH264Encoder() != "") // 有可用 H.264 编码器则默认启用
+	// H.264 可用 = ffmpeg 有编码器，或 native MF 路径已开启且可用。
+	useH264.Store(h264Available())
 	format := "jpeg"
 	if useH264.Load() {
 		format = "h264"
@@ -202,7 +203,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 	var currentID, currentQuality, currentMaxW, currentFPS atomic.Int32
 	// WebRTC 模式：前端通过 ?h264=1 URL 参数提前告知，在进入主循环前拉满参数。
 	// 非 WebRTC（WS JPEG / WS H.264 手动模式）使用默认值，用户可手动调节。
-	if r.URL.Query().Get("h264") == "1" && currentH264Encoder() != "" {
+	if r.URL.Query().Get("h264") == "1" && h264Available() {
 		currentQuality.Store(100) // 最高画质
 		currentMaxW.Store(0)      // 原始分辨率
 		// fps 保持零值（自动跟随显示器刷新率）
@@ -304,7 +305,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 					}
 				}
 				if cm.Webcodecs != nil {
-					useH264.Store(*cm.Webcodecs && currentH264Encoder() != "")
+					useH264.Store(*cm.Webcodecs && h264Available())
 				}
 				if cm.Control != nil {
 					if *cm.Control {
@@ -505,7 +506,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 					useH264.Store(true)
 					if ff != nil {
 						ff.unsubscribe(subID)
-						releaseFFmpeg(curScreen)
+						currentSessionPool.get().release(curScreen)
 						ff = nil
 						ffScreen = -1
 						curScreen = -1
@@ -523,12 +524,12 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 				firstJoin := ff == nil
 				if ff != nil {
 					ff.unsubscribe(subID)
-					releaseFFmpeg(curScreen)
+					currentSessionPool.get().release(curScreen)
 				}
 				if paramsChanged && isCtrl {
-					ff = restartFFmpeg(id, q, mw, fps, h264)
+					ff = currentSessionPool.get().restart(id, q, mw, fps, h264)
 				} else {
-					ff = acquireFFmpeg(id, q, mw, fps, h264)
+					ff = currentSessionPool.get().acquire(id, q, mw, fps, h264)
 				}
 				if ff == nil {
 					log.Printf("[%s] ffmpeg 启动失败 display=%d", userName, id)
@@ -544,6 +545,16 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 					continue
 				}
 				subID, subCh = ff.subscribe()
+
+				// native 会话的格式需从会话本体读取（nativePool 不写 ffPool 参数表）。
+				if usingNativePool() && ff != nil {
+					ffH264 = ff.h264Mode()
+					ffQ = q
+					ffMW = mw
+					ffFPS = fps
+					useH264.Store(ffH264)
+					h264 = ffH264
+				}
 
 				// 对齐追踪变量到池中实际参数（加入已有会话时可能与用户默认值不同）
 				// 注意：不同步 currentFPS —— fps=0 表示"自动检测"，
@@ -616,19 +627,19 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			case data = <-subCh:
 				if data == nil {
 					// 记录当前编码器是否曾成功输出帧（用于判断是兼容性问题还是过载）
-					hadFrames := ff != nil && ff.sentFrames
+					hadFrames := ff != nil && ff.hasSentFrames()
 					encName := ""
 					if ffH264 {
 						encName = currentH264Encoder()
 					}
 
 					ff.unsubscribe(subID)
-					releaseFFmpeg(curScreen)
+					currentSessionPool.get().release(curScreen)
 					ff = nil
 					ffScreen = -1
 					curScreen = -1
 
-					if ffH264 {
+					if ffH264 && !usingNativePool() {
 						if hadFrames {
 							// 编码器曾工作 → 标记可用，重试同一编码器
 							markH264EncoderWorked(encName)
@@ -656,21 +667,21 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			case <-readErr:
 				return
 			case <-time.After(8 * time.Second):
-				log.Printf("[%s] ffmpeg 超时无帧 display=%d", userName, curScreen)
+				log.Printf("[%s] 会话超时无帧 display=%d", userName, curScreen)
 
-				hadFrames := ff != nil && ff.sentFrames
+				hadFrames := ff != nil && ff.hasSentFrames()
 				encName := ""
 				if ffH264 {
 					encName = currentH264Encoder()
 				}
 
 				ff.unsubscribe(subID)
-				releaseFFmpeg(curScreen)
+				currentSessionPool.get().release(curScreen)
 				ff = nil
 				ffScreen = -1
 				curScreen = -1
 
-				if ffH264 {
+				if ffH264 && !usingNativePool() {
 					if hadFrames {
 						markH264EncoderWorked(encName)
 						h264Timeouts++
