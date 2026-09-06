@@ -13,33 +13,23 @@ func ValidateAnnexB(data []byte) (bool, string) {
 
 // BGRAToNV12 把 w*h 的 BGRA 像素（B,G,R,A 序，如 DXGI 桌面捕获）转为 NV12。
 // src 长度须 >= w*h*4。
+//
+// 性能注记：Y = ((66R+129G+25B)>>8)+16 中 (66+129+25)*255>>8 = 219，故 Y 恒在 [16,235]，
+// 无需逐像素钳制分支；去掉钳制能显著提速大尺寸转换。
 func BGRAToNV12(src []byte, w, h int) []byte {
 	dst := make([]byte, w*h*3/2)
-	// Y 平面：BT.601 limited-range。Y = 16 + (66R+129G+25B)/256，钳 16..235。
+	// Y 平面：BT.601 limited-range，无钳制（恒在 [16,235]）。
 	yi := 0
-	for y := 0; y < h; y++ {
-		row := y * w
-		for x := 0; x < w; x++ {
-			p := (row + x) * 4
-			// BGRA：b=src[p], g=src[p+1], r=src[p+2]
-			b, g, r := int(src[p]), int(src[p+1]), int(src[p+2])
-			yuv := ((66*r + 129*g + 25*b) >> 8) + 16
-			if yuv < 16 {
-				yuv = 16
-			} else if yuv > 235 {
-				yuv = 235
-			}
-			dst[yi] = byte(yuv)
-			yi++
-		}
+	si := 0
+	for i := 0; i < w*h; i++ {
+		b := int(src[si])
+		g := int(src[si+1])
+		r := int(src[si+2])
+		dst[yi] = byte(((66*r + 129*g + 25*b) >> 8) + 16)
+		yi++
+		si += 4
 	}
-	// UV 平面交错（每 2x2 取一个 UV 对）：NV12 布局 = Y 平面后紧跟 w/2*h/2 个 UV 交错字节。
-	// 每个色度采样对应 2x2 亮度块：字节序 [U,V] 成对交替。
-	// 色度用 BT.601 limited-range 公式（U/V 中心 128，范围约 16..240）：
-	//   U = 128 - 0.1687*R - 0.3313*G + 0.5000*B
-	//   V = 128 + 0.5000*R - 0.4187*G - 0.0813*B
-	// 定点实现（>>8）：U = 128 + (-43R - 85G + 128B + 128)>>8
-	//              V = 128 + (128R - 107G - 21B + 128)>>8
+	// UV 平面交错（每 2x2 取一个 UV 对）：字节序 [U,V] 成对。
 	uvw := w / 2
 	uvh := h / 2
 	uvBase := w * h
@@ -68,8 +58,61 @@ func BGRAToNV12(src []byte, w, h int) []byte {
 				v = 255
 			}
 			off := uvBase + (j*uvw+i)*2
-			dst[off] = byte(u)     // U
-			dst[off+1] = byte(v)   // V
+			dst[off] = byte(u)   // U
+			dst[off+1] = byte(v) // V
+		}
+	}
+	return dst
+}
+
+// BGRAToNV12Into 把 BGRA 转为 NV12 写入复用缓冲 dst（须 len>=w*h*3/2），避免每帧大块分配。
+// 返回 dst 的 [0, w*h*3/2) 子切片。若 dst 过小则内部自分配并返回（仍正确）。
+func BGRAToNV12Into(dst, src []byte, w, h int) []byte {
+	need := w * h * 3 / 2
+	if cap(dst) < need {
+		return BGRAToNV12(src, w, h)
+	}
+	dst = dst[:need]
+	yi := 0
+	si := 0
+	for i := 0; i < w*h; i++ {
+		b := int(src[si])
+		g := int(src[si+1])
+		r := int(src[si+2])
+		dst[yi] = byte(((66*r + 129*g + 25*b) >> 8) + 16)
+		yi++
+		si += 4
+	}
+	uvw := w / 2
+	uvh := h / 2
+	uvBase := w * h
+	for j := 0; j < uvh; j++ {
+		for i := 0; i < uvw; i++ {
+			sx := i*2 + 1
+			sy := j*2 + 1
+			if sx >= w {
+				sx = w - 1
+			}
+			if sy >= h {
+				sy = h - 1
+			}
+			p := (sy*w + sx) * 4
+			b, g, r := int(src[p]), int(src[p+1]), int(src[p+2])
+			u := 128 + ((-43*r - 85*g + 128*b + 128) >> 8)
+			v := 128 + ((128*r - 107*g - 21*b + 128) >> 8)
+			if u < 0 {
+				u = 0
+			} else if u > 255 {
+				u = 255
+			}
+			if v < 0 {
+				v = 0
+			} else if v > 255 {
+				v = 255
+			}
+			off := uvBase + (j*uvw+i)*2
+			dst[off] = byte(u)
+			dst[off+1] = byte(v)
 		}
 	}
 	return dst

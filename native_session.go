@@ -42,7 +42,7 @@ type nativeSession struct {
 
 func newNativeSession(display, quality, maxW, fps int) *nativeSession {
 	if fps <= 0 {
-		fps = 30 // 默认安全帧率上限；用户可在前端下拉选更高值
+		fps = 60 // 默认平滑目标帧率；用户可下调
 	}
 	s := &nativeSession{
 		subs:    make(map[int]chan []byte),
