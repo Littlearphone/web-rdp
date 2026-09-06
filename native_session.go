@@ -290,8 +290,13 @@ func (s *nativeSession) produce() {
 			// 消除"后端显示 WebRTC 用户、前端却只走 wss"的状态混乱，并降低首屏延迟。
 			writeWebRTCSample(s.display, frame, time.Second/30)
 		}
-		// 限制约 30fps，避免 DXGI 满速喂帧把软件编码器压垮
-		timeSleepMs(20)
+		// 节流：软件编码器慢，需 20ms 保护避免积压；硬件编码器极快，交给采集帧率驱动
+		//（DXGI 只在新帧变化时返回），仅留 1ms 防极速空转，以支持 60fps+ 高帧率。
+		if encName == "software-sync-MF" {
+			timeSleepMs(20)
+		} else {
+			timeSleepMs(1)
+		}
 	}
 }
 
