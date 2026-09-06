@@ -37,15 +37,20 @@ type nativeSession struct {
 	height   int
 	maxW     int
 	quality  int
+	fps      int // 目标帧率（>0 时节流产帧到该值；0 = 不强制，跟随采集）
 }
 
 func newNativeSession(display, quality, maxW, fps int) *nativeSession {
+	if fps <= 0 {
+		fps = 30 // 默认安全帧率上限；用户可在前端下拉选更高值
+	}
 	s := &nativeSession{
 		subs:    make(map[int]chan []byte),
 		display: display,
 		stopCh:  make(chan struct{}),
 		quality: quality,
 		maxW:    maxW,
+		fps:     fps,
 	}
 	s.start()
 	return s
@@ -216,12 +221,10 @@ func (s *nativeSession) produce() {
 		if enc == nil {
 			tw = cw
 			th = ch
-			maxTarget := s.maxW
-			if maxTarget <= 0 {
-				maxTarget = 1920
-			}
-			if tw > maxTarget {
-				tw = maxTarget
+			// 尺寸策略：maxW>0 时压到指定宽度；maxW<=0(选"原始")用采集全分辨率，
+			// 保证"最高"即真实原始分辨率，不再默认压到 1920 导致放大模糊。
+			if s.maxW > 0 && tw > s.maxW {
+				tw = s.maxW
 				th = ch * tw / cw
 			}
 			if tw%2 != 0 {
@@ -293,12 +296,15 @@ func (s *nativeSession) produce() {
 			dur := measuredFrameDur(&lastSend)
 			writeWebRTCSample(s.display, frame, dur)
 		}
-		// 节流：软件编码器慢，需 20ms 保护避免积压；硬件编码器极快，交给采集帧率驱动
-		//（DXGI 只在新帧变化时返回），仅留 1ms 防极速空转，以支持高帧率。
+		// 节流：软件编码器慢，需 20ms 保护避免积压；硬件按目标帧率 s.fps 节流上限，
+		// 让"帧率选择"真正影响投递速率（画面活动时最多按所选 fps 产帧）。
 		if encName == "software-sync-MF" {
 			timeSleepMs(20)
-		} else {
-			timeSleepMs(1)
+			continue
+		}
+		target := time.Second / time.Duration(s.fps)
+		if since := time.Since(lastSend); since < target {
+			time.Sleep(target - since)
 		}
 	}
 }
