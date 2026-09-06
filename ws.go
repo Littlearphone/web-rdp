@@ -520,13 +520,14 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			isCtrl = hasControl(userName)
 
 			// 仅控制者可因参数变化重启 ffmpeg；非控制者静默接受现有参数
-			if ff == nil || ffScreen != id || (paramsChanged && isCtrl) {
+			// （放开：允许连接用户调画质/分辨率/帧率，不强制要求控制权）
+			if ff == nil || ffScreen != id || paramsChanged {
 				firstJoin := ff == nil
 				if ff != nil {
 					ff.unsubscribe(subID)
 					currentSessionPool.get().release(curScreen)
 				}
-				if paramsChanged && isCtrl {
+				if paramsChanged {
 					ff = currentSessionPool.get().restart(id, q, mw, fps, h264)
 				} else {
 					ff = currentSessionPool.get().acquire(id, q, mw, fps, h264)
@@ -729,9 +730,17 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			if ffH264 {
 				// 非阻塞发送。IDR 丢失仅短暂花屏（GOP=120 下约 0.85s），
 				// 远好过硬背压造成多秒管道卡死。
-				select {
-				case outCh <- wsMessage{websocket.BinaryMessage, data}:
-				default:
+				// 双路避让：本用户 WebRTC 已连通并绑定本显示器时，视频走 WebRTC 轨，
+				// 不再经 WS 推二进制帧，避免同一画面双路消耗带宽与解码。
+				skipWS := false
+				if rtcActive, rtcDisp := userRTCVideoStatus(userName); rtcActive && rtcDisp == id {
+					skipWS = true
+				}
+				if !skipWS {
+					select {
+					case outCh <- wsMessage{websocket.BinaryMessage, data}:
+					default:
+					}
 				}
 			} else {
 				select {

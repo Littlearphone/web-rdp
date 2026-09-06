@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/webrtc/v4"
@@ -26,10 +27,11 @@ var (
 
 // rtcPeer 表示单个用户的 WebRTC 会话
 type rtcPeer struct {
-	pc       *webrtc.PeerConnection
-	userName string
-	display  int          // 当前订阅的显示器
-	sendFn   func([]byte) // 通过 WebSocket 发送 JSON 消息给前端（ICE candidate 回调使用）
+	pc        *webrtc.PeerConnection
+	userName  string
+	display   int          // 当前订阅的显示器
+	sendFn    func([]byte) // 通过 WebSocket 发送 JSON 消息给前端（ICE candidate 回调使用）
+	connected atomic.Bool  // PeerConnection 是否已连通（视频真正走通）
 }
 
 // initWebRTC 初始化全局 WebRTC 基础设施。
@@ -120,9 +122,10 @@ func createRTCSession(userName string, displayID int, sendFn func([]byte)) (offe
 		peer.sendFn(b)
 	})
 
-	// 连接状态变更日志
+	// 连接状态变更日志 + 记录连通态（用于 WS/WebRTC 双路避让）
 	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
 		log.Printf("[WebRTC:%s] %s", userName, s)
+		peer.connected.Store(s == webrtc.PeerConnectionStateConnected)
 		if s == webrtc.PeerConnectionStateClosed ||
 			s == webrtc.PeerConnectionStateFailed {
 			removeRTCSession(userName)
@@ -180,6 +183,16 @@ func handleRTCICE(userName string, iceJSON string) error {
 		return fmt.Errorf("ICE candidate 解析失败: %w", err)
 	}
 	return peer.pc.AddICECandidate(ice)
+}
+
+// userRTCVideoStatus 报告用户 WebRTC 视频是否已连通及所绑定显示器。
+func userRTCVideoStatus(userName string) (active bool, display int) {
+	rtcPeersMu.Lock()
+	defer rtcPeersMu.Unlock()
+	if p, ok := rtcPeers[userName]; ok && p.connected.Load() {
+		return true, p.display
+	}
+	return false, -1
 }
 
 // removeRTCSession 关闭并移除用户的 WebRTC 会话。

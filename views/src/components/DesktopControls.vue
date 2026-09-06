@@ -42,34 +42,39 @@
       <span class="label" style="color:#888">{{ controlTip }}</span>
     </template>
 
-    <!-- 画质 / 分辨率 / 编码 / 帧率：仅控制者可见 -->
+    <!-- 画质 / 分辨率 / 帧率：放开给所有连接用户手动调（不要求控制权；WebRTC 模式也可调） -->
+    <span class="sep">|</span>
+    <span class="label">画质</span>
+    <n-slider
+      v-model:value="store.currentQ"
+      :min="30"
+      :max="100"
+      :step="5"
+      style="width:60px"
+      @update:value="store.sendSettings"
+    />
+    <span class="sep">|</span>
+    <span class="label">分辨率</span>
+    <n-select
+      v-model:value="store.currentMW"
+      :options="resOptions"
+      size="tiny"
+      style="width:90px"
+      @update:value="store.sendSettings"
+    />
+
+    <template v-if="store.streamFormat === 'h264' && store.statsMaxRate > 0">
+      <span class="sep">|</span>
+      <n-select
+        v-model:value="store.currentFPS"
+        :options="fpsOptions"
+        size="tiny"
+        style="width:100px"
+        @update:value="onFPSChange"
+      />
+    </template>
+
     <template v-if="isController">
-      <!-- WebRTC 模式下隐藏画质/分辨率/FPS，自动拉满 -->
-      <template v-if="!isWebRTCSimplified">
-        <span class="sep">|</span>
-
-        <span class="label">画质</span>
-        <n-slider
-          v-model:value="store.currentQ"
-          :min="30"
-          :max="100"
-          :step="5"
-          style="width:60px"
-          @update:value="store.sendSettings"
-        />
-
-        <span class="sep">|</span>
-
-        <span class="label">分辨率</span>
-        <n-select
-          v-model:value="store.currentMW"
-          :options="resOptions"
-          size="tiny"
-          style="width:90px"
-          @update:value="store.sendSettings"
-        />
-      </template>
-
       <template v-if="store.canH264">
         <span class="sep">|</span>
 
@@ -84,18 +89,6 @@
           </template>
           开启：GPU 硬件编码，流量低延迟小<br>关闭：兼容模式，纯软件编码
         </n-tooltip>
-      </template>
-
-      <template v-if="(store.streamFormat === 'h264' && store.statsMaxRate > 0) && !isWebRTCSimplified">
-        <span class="sep">|</span>
-
-        <n-select
-          v-model:value="store.currentFPS"
-          :options="fpsOptions"
-          size="tiny"
-          style="width:100px"
-          @update:value="onFPSChange"
-        />
       </template>
 
       <!-- 自适应偏好：仅 H.264 模式生效 -->
@@ -169,11 +162,8 @@ const store = useAppStore();
 const { connect } = useWebSocket();
 const notification = useNotification();
 
-/** 当前用户是否为控制者（仅控制者可见流配置项） */
+/** 当前用户是否为控制者（控制权/输入相关开关仍仅控制者可见） */
 const isController = computed(() => store.statsOwner === store.statsUser);
-
-/** WebRTC 模式下简化 UI：隐藏画质/分辨率/FPS，参数拉满靠自适应 + GCC */
-const isWebRTCSimplified = computed(() => store.webrtcActive);
 
 /** 带宽显示：自动选择 KB/s 或 MB/s */
 const bwText = computed(() => {
