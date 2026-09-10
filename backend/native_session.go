@@ -213,6 +213,11 @@ func (s *nativeSession) produce() {
 	var lastEncode time.Time
 	consecErr := 0
 	target := time.Second / time.Duration(s.fps)
+	// 帧率节流用"配额累计"而不是"距上一帧是否够久"：
+	// 后者在源帧率 > 目标时会稳定砍半（105Hz 源 → ~52fps），源帧率恰好等于目标时
+	// 抖动还会让它间歇性砍半（60Hz 源 → 30~60fps 摆动），这正是"上不去 60fps"的原因。
+	// 配额法把每帧的时间增量存进 credit，攒够一帧就编一帧，长期稳定在目标帧率。
+	credit := target
 
 	for {
 		if !s.hasSubscribers() {
@@ -231,13 +236,21 @@ func (s *nativeSession) produce() {
 				log.Printf("[tier] 显示器%d 采集 broker 已结束，档位会话退出", s.display)
 				return // broker 关闭（采集失败/无档位）→ EOF
 			}
-			// 帧率节流：超过目标 fps 的中间帧跳过（首帧必编以初始化编码器）。
+			// 帧率节流：配额不足则丢弃该帧（不编码）。首帧 credit 已给满，必定编码以初始化。
+			now := time.Now()
 			if !lastEncode.IsZero() {
-				if d := time.Since(lastEncode); d < target {
-					continue
+				credit += now.Sub(lastEncode)
+				if credit > 2*target {
+					credit = 2 * target // 静止/卡顿后不补爆发，避免一串追赶帧
 				}
+			} else {
+				credit = target
 			}
-			lastEncode = time.Now()
+			lastEncode = now
+			if credit < target {
+				continue // 配额不足：丢弃该帧
+			}
+			credit -= target
 
 			// 首次初始化编码器（尺寸取自首帧；maxW>0 压到目标宽度，否则用采集全分辨率）。
 			if es.enc == nil {

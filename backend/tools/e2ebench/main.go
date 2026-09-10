@@ -91,6 +91,49 @@ func main() {
 	fmt.Printf("=== 端到端管线基准 ===\n源 %dx%d → 编码 %dx%d\n\n", w, h, tw, th)
 	workers = native.OptimalNV12Workers(th)
 
+	// ── 内核 A/B：旧两步 vs 新融合（串行/并行），含逐字节一致性 ──
+	// 用一个真实采集帧，对"等尺寸"和"需缩放"两种目标分别测。
+	if fr, fw, fh, e := capSrc.AcquireBGRA(2000); e == nil && fr != nil {
+		fmt.Println("内核对比（真实采集帧 " + fmt.Sprint(fw) + "x" + fmt.Sprint(fh) + "）:")
+		for _, cfg := range []struct{ name string; tw, th int }{
+			{"等尺寸(原始分辨率)", fw, fh},
+			{fmt.Sprintf("缩放到 %dx%d", tw, th), tw, th},
+		} {
+			cw, ch := cfg.tw, cfg.th
+			if cw%2 != 0 {
+				cw--
+			}
+			if ch%2 != 0 {
+				ch--
+			}
+			// 旧实现（与生产等价）：等尺寸时 scaleBGRA 直接返回原帧、不做缩放，
+			// 只有需要缩小时才先 DownscaleBGRA 再转换。
+			var oldOut []byte
+			tOld := timeKernel(6, func() {
+				small := fr
+				if fw != cw || fh != ch {
+					small = native.DownscaleBGRA(fr, fw, fh, cw, ch)
+				}
+				oldOut = native.BGRAToNV12Into(nil, small, cw, ch)
+			})
+			// 新融合串行
+			var serOut []byte
+			tSer := timeKernel(6, func() {
+				serOut = native.DownscaleBGRAToNV12Into(nil, fr, fw, fh, cw, ch)
+			})
+			// 新融合并行
+			var parOut []byte
+			tPar := timeKernel(6, func() {
+				parOut = native.DownscaleBGRAToNV12ParallelInto(nil, fr, fw, fh, cw, ch, workers)
+			})
+			fmt.Printf("  %-22s 旧两步 %6.2fms | 新串行 %6.2fms | 新并行(%d线程) %6.2fms\n",
+				cfg.name, ms(tOld), ms(tSer), workers, ms(tPar))
+			fmt.Printf("  %-22s 一致性: 串行 vs 旧 %s | 并行 vs 旧 %s\n", "",
+				byteDiff(oldOut, serOut), byteDiff(oldOut, parOut))
+		}
+		fmt.Println()
+	}
+
 	// NVENC 编码器（与 nativeSession 相同：异步 Push/Next 流水线）
 	br := native.EstimateBitrateForQuality(tw, th, 80)
 	enc, err := native.NewAsyncMFH264Encoder(tw, th, br)
@@ -245,4 +288,36 @@ func lastAvg(s *stage) float64 {
 		sum += d
 	}
 	return float64(sum.Microseconds()) / 1000 / float64(len(s.durs))
+}
+
+// timeKernel 跑 n 次取中位数耗时（先预热）。
+func timeKernel(n int, fn func()) time.Duration {
+	fn()
+	ds := make([]time.Duration, 0, n)
+	for i := 0; i < n; i++ {
+		t := time.Now()
+		fn()
+		ds = append(ds, time.Since(t))
+	}
+	sort.Slice(ds, func(i, j int) bool { return ds[i] < ds[j] })
+	return ds[len(ds)/2]
+}
+
+func ms(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 }
+
+// byteDiff 比较两份 NV12 输出，返回可读结论。
+func byteDiff(a, b []byte) string {
+	if len(a) != len(b) {
+		return fmt.Sprintf("✗ 长度不同 %d vs %d", len(a), len(b))
+	}
+	diff := 0
+	for i := range a {
+		if a[i] != b[i] {
+			diff++
+		}
+	}
+	if diff == 0 {
+		return "✓ 逐字节一致"
+	}
+	return fmt.Sprintf("✗ 不同 %d/%d", diff, len(a))
 }
