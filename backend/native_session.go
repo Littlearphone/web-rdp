@@ -196,6 +196,7 @@ type encodeState struct {
 	tw, th   int
 	isPush   bool // 硬件异步走 Push/Next 流水线
 	lastSend time.Time
+	workers  int // 融合缩放+色彩转换的并发度（1=串行）
 }
 
 // produce 消费 broker feed 并编码 fan-out。到 stop 或出错退出（广播 EOF）。
@@ -244,8 +245,12 @@ func (s *nativeSession) produce() {
 					return // 编码器均不可用 → EOF → 落 JPEG
 				}
 			}
-			small := s.scaleBGRA(es, fr)
-			nv12 := native.BGRAToNV12(small, es.tw, es.th)
+			// 融合"缩放+色彩转换"一趟直出 NV12：省掉中间 BGRA 缓冲（2560x1070 约 10.7MB）
+			// 与二次遍历，并按行分片并行（实测串行 9.5ms → 6 线程 1.9ms，输出逐字节一致）。
+			// 注意：不能复用 NV12 缓冲——硬件异步编码器的 Push 只入队，缓冲区要等 pump
+			// 拷进 IMFSample 后才可复用，复用会导致帧撕裂（见 asyncencoder.go 契约）。
+			nv12 := native.DownscaleBGRAToNV12ParallelInto(
+				nil, fr.bgra, fr.w, fr.h, es.tw, es.th, es.workers)
 			if es.isPush {
 				hw, _ := es.enc.(pushH264)
 				hw.Push(nv12)
@@ -294,6 +299,8 @@ func (s *nativeSession) initEncoder(es *encodeState, fr brokerFrame) bool {
 	if tw <= 0 || th <= 0 {
 		return false
 	}
+	// 融合内核并发度：按 CPU 核数与目标高度裁剪（多档位并存时避免过度抢占）。
+	es.workers = native.OptimalNV12Workers(th)
 	br := native.EstimateBitrateForQuality(tw, th, s.quality)
 	hw, hwerr := native.NewAsyncMFH264Encoder(tw, th, br)
 	if hwerr == nil {
@@ -304,7 +311,7 @@ func (s *nativeSession) initEncoder(es *encodeState, fr brokerFrame) bool {
 		s.width, s.height = tw, th
 		s.wg.Add(1)
 		go s.pushDeliver(es, hw)
-		log.Printf("[tier] 显示器%d 编码后端=hardware-async-MF 源=%dx%d 编码=%dx%d maxW=%d fps=%d", s.display, cw, ch, tw, th, s.maxW, s.fps)
+		log.Printf("[tier] 显示器%d 编码后端=hardware-async-MF 源=%dx%d 编码=%dx%d maxW=%d fps=%d cvt线程=%d", s.display, cw, ch, tw, th, s.maxW, s.fps, es.workers)
 		return true
 	}
 	sw, swerr := native.NewMFH264EncoderQ(tw, th, 30, br)
@@ -316,15 +323,8 @@ func (s *nativeSession) initEncoder(es *encodeState, fr brokerFrame) bool {
 	es.encName = "software-sync-MF"
 	es.tw, es.th = tw, th
 	s.width, s.height = tw, th
-	log.Printf("[tier] 显示器%d 编码后端=software-sync-MF(硬件不可用 %v) 源=%dx%d 编码=%dx%d maxW=%d fps=%d", s.display, hwerr, cw, ch, tw, th, s.maxW, s.fps)
+	log.Printf("[tier] 显示器%d 编码后端=software-sync-MF(硬件不可用 %v) 源=%dx%d 编码=%dx%d maxW=%d fps=%d cvt线程=%d", s.display, hwerr, cw, ch, tw, th, s.maxW, s.fps, es.workers)
 	return true
-}
-
-func (s *nativeSession) scaleBGRA(es *encodeState, fr brokerFrame) []byte {
-	if fr.w == es.tw && fr.h == es.th {
-		return fr.bgra
-	}
-	return native.DownscaleBGRA(fr.bgra, fr.w, fr.h, es.tw, es.th)
 }
 
 // pushDeliver 独立 goroutine：从硬件异步编码器取编码输出并投递(fanout + 档位 WebRTC)。

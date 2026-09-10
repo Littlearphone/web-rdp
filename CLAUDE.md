@@ -229,6 +229,13 @@ types/index.ts                  TypeScript 类型定义
 - **认证握手独占性（关键）**：后端认证窗口内读取的消息只认第一条为 auth 应答，任何抢发的控制消息都会被判为非认证消息。因此前端 `connectionStatus` 在认证放行（收到 `{user,format}`）之后才置 `connected`，认证完成前的 `store.send()` 一律入队（`store.wsReady`/`markReady()`），认证摘要走 `store.sendRaw()` 直写 socket。**破坏这条会在安全上下文（127.0.0.1/localhost/https）下直接登录失败**——`ScreenCanvas` 挂载即发 `{rtc_webrtc:true}` 是历史上踩过的坑
 - **crypto.subtle 仅安全上下文可用**：`http://<局域网IP>:9000`（非安全上下文）下 `crypto.subtle` 为 `undefined`，SHA-256 摘要必须走 `@/utils/sha256.ts` 的纯 JS 回退，禁止直接调用 `crypto.subtle.digest`
 - **认证失败必须回传原因**：后端拒绝时调用 `notifyAuthFailure()`（JSON `auth_result`/`auth_msg` + Close 帧 reason + 读应答避免 RST），前端在登录弹窗显示 `store.authError`
+- **2K 高帧率关键路径（性能不变式）**：
+  - 缩放 + BGRA→NV12 必须走融合内核 `native.DownscaleBGRAToNV12ParallelInto`（一趟直出 NV12），**禁止**再拆成 `DownscaleBGRA` + `BGRAToNV12` 两步（多一块 10.7MB 中间缓冲 + 二次遍历，实测慢 25%）。融合实现与旧两步**逐字节一致**，可安全替换
+  - 并行分片必须**按偶数行对齐**（否则同一 UV 行被两个 goroutine 重复写）
+  - **禁止复用 NV12 缓冲**：硬件异步编码器 `Push()` 只入队，缓冲要等 pump 拷进 `IMFSample` 后才可复用（复用 → 帧撕裂）。这是当前每帧新建 4MB 缓冲的原因
+  - 采集回读只允许一次全量拷贝（`readbackTexture` 直接产出最终缓冲）；历史上存在"中间缓冲 + 再整块 copy"的重复 19.8MB 拷贝
+  - 量化工具：`backend/tools/e2ebench`（分阶段成本 + E2E 延迟 + 融合内核逐字节一致性对照），见 `docs/2k-latency-report.md`
+- **测试/验证用同一个 exe 路径**：反复 `go build -o <新名字>` 或 `go run` 会生成新路径的程序，每次都会触发 Windows 防火墙弹窗；统一用 `dist\web-rdp.exe`，并优先 `-listen 127.0.0.1`（回环不触发防火墙）
 - **WebRTC 双路避让**：`useWebSocket.ts` 的二进制帧 handler 在 `isWebRTCConnected()` 为 true 时跳过——避免同一画面被 WebRTC 和 WS 双重渲染
 - **WebRTC 生命周期**：`ScreenCanvas` 的 `watch connectionStatus` 在 `disconnected/failed` 时自动 `webrtc.close()`；`watch streamFormat` 切换为 `jpeg` 时关闭 WebRTC（JPEG 不适用 RTP）
 - **pion per-tier 视频轨**：`tierTracks[trackKey]`(显示器-maxW-fps) 每档位一条 `TrackLocalStaticSample`；用户 PeerConnection 订阅其当前档位轨，档位/显示器变化时 `restartRTC` 通知前端重建。`WriteSample` 非阻塞，无订阅者时静默丢弃——禁止反压阻塞档位产帧

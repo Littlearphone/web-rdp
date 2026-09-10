@@ -186,7 +186,8 @@ type d3d11Texture2DDesc struct {
 	MiscFlags      uint32
 }
 
-// readbackTexture 创建 staging 纹理并回读桌面帧为 BGRA。
+// readbackTexture 回读桌面帧为 BGRA。只分配一次、只拷贝一次：
+// 旧实现先建中间缓冲（19.8MB）再由 AcquireBGRA 整块拷到结果，多做了一趟全量拷贝。
 func (d *dxgiDuplicator) readbackTexture(tex unsafe.Pointer) (*dxgiFrame, error) {
 	// ID3D11Texture2D::GetDesc 槽位 10（GetDesc 返回 void，不检查返回值）
 	getDesc := comMethod(tex, 10)
@@ -238,12 +239,15 @@ func (d *dxgiDuplicator) readbackTexture(tex unsafe.Pointer) (*dxgiFrame, error)
 	if pData == nil || rowPitch == 0 {
 		return nil, fmt.Errorf("Map 返回空数据")
 	}
-	// 拷贝：逐行（行尾对齐），每像素 4 字节 BGRA。
+	// 拷贝：逐行（行尾对齐），每像素 4 字节 BGRA。单一缓冲，一次拷贝。
 	buf := make([]byte, w*h*4)
 	src := unsafe.Slice((*byte)(pData), int(rowPitch)*h)
-	dst := buf
-	for row := 0; row < h; row++ {
-		copy(dst[row*w*4:], src[row*int(rowPitch):row*int(rowPitch)+w*4])
+	if int(rowPitch) == w*4 {
+		copy(buf, src[:w*h*4]) // 行距紧凑 → 一次整块拷贝
+	} else {
+		for row := 0; row < h; row++ {
+			copy(buf[row*w*4:], src[row*int(rowPitch):row*int(rowPitch)+w*4])
+		}
 	}
 	return &dxgiFrame{Data: buf, Width: w, Height: h}, nil
 }
@@ -271,6 +275,7 @@ func NewDesktopCapture(outputIdx int) (*DesktopCapture, error) {
 }
 
 // AcquireBGRA 取下一帧并返回 BGRA 内存副本 + 尺寸。timeoutMs 内无新帧返回 (nil,0,0,nil)。
+// 回读直接产出最终缓冲，不再做第二次全量拷贝（3440x1440 省约 19.8MB/帧）。
 func (c *DesktopCapture) AcquireBGRA(timeoutMs int) ([]byte, int, int, error) {
 	fr, err := c.dup.AcquireFrame(timeoutMs)
 	if err != nil {
@@ -279,9 +284,7 @@ func (c *DesktopCapture) AcquireBGRA(timeoutMs int) ([]byte, int, int, error) {
 	if fr == nil {
 		return nil, 0, 0, nil
 	}
-	out := make([]byte, len(fr.Data))
-	copy(out, fr.Data)
-	return out, fr.Width, fr.Height, nil
+	return fr.Data, fr.Width, fr.Height, nil
 }
 
 // Close 释放直捕会话。
