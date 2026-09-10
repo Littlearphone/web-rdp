@@ -28,9 +28,11 @@ jobs:
           node-version: '22'
 
       - name: 安装 pnpm
+        # 不传 version：版本由 package.json 的 packageManager 字段决定。
+        # 两者同时指定会让 pnpm/action-setup 报
+        # "Multiple versions of pnpm specified" 而直接失败（历史上从 2026-09-07 起
+        # CI 一直卡在这一步，导致 v0.0.2 之后再没有 Release 产出）。
         uses: pnpm/action-setup@v4
-        with:
-          version: latest
 
       - name: 构建前端
         run: |
@@ -60,7 +62,11 @@ jobs:
           name: web-rdp
 
       - name: 计算 SHA256
-        run: sha256sum web-rdp.exe > web-rdp.exe.sha256
+        id: sha
+        shell: bash
+        run: |
+          sha256sum web-rdp.exe > web-rdp.exe.sha256
+          echo "digest=$(cut -d' ' -f1 web-rdp.exe.sha256)" >> "$GITHUB_OUTPUT"
 
       - name: 创建 GitHub Release
         uses: softprops/action-gh-release@v2
@@ -75,7 +81,7 @@ jobs:
 
             ## SHA256
             ```
-            ${{ github.ref_name }}
+            ${{ steps.sha.outputs.digest }}
             ```
           files: |
             web-rdp.exe
