@@ -98,12 +98,47 @@ export const useAppStore = defineStore('app', () => {
   // 操作
   // ═══════════════════════════════════════════
 
-  /** 发送 JSON 到后端 */
+  /**
+   * 是否已完成认证（后端放行）。
+   * 认证握手期间后端只认第一条消息为 auth 应答，任何抢发的控制消息都会
+   * 让认证直接失败——因此认证完成前的发送一律入队，放行后按序补发。
+   */
+  const wsReady = ref(false);
+  const pendingSends: Record<string, unknown>[] = [];
+
+  /** 发送 JSON 到后端（认证未完成时入队，避免污染认证握手） */
   function send(o: Record<string, unknown>) {
+    if (!wsReady.value) {
+      if (pendingSends.length < 100) pendingSends.push(o);
+      return;
+    }
     if (ws.value && ws.value.readyState === WebSocket.OPEN) {
       ws.value.send(JSON.stringify(o));
     }
   }
+
+  /** 认证通过：放行队列中积压的消息 */
+  function markReady() {
+    wsReady.value = true;
+    const queued = pendingSends.splice(0, pendingSends.length);
+    for (const m of queued) send(m);
+  }
+
+  /** 新连接 / 断开：回到未认证状态并清空积压 */
+  function resetReady() {
+    wsReady.value = false;
+    pendingSends.length = 0;
+  }
+
+  /** 直接写 socket（认证握手专用，绕过发送队列） */
+  function sendRaw(o: Record<string, unknown>) {
+    if (ws.value && ws.value.readyState === WebSocket.OPEN) {
+      ws.value.send(JSON.stringify(o));
+    }
+  }
+
+  /** 认证失败原因（登录弹窗展示） */
+  const authError = ref('');
 
   /** 剪贴板状态 */
   const remoteClipboard = ref(''); // 最后一次从远端同步的剪贴板文本
@@ -161,5 +196,6 @@ export const useAppStore = defineStore('app', () => {
     adaptActive, adaptQ, adaptFPS, adaptMode, netFPS, netQueue,
     // 操作
     send, sendSettings, sendKey, updateOrigRes, clearReconnectTimer,
+    wsReady, authError, markReady, resetReady, sendRaw,
   };
 });

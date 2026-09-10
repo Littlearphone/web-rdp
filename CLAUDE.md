@@ -68,7 +68,10 @@ display_windows.go   多显示器刷新率检测（EnumDisplaySettingsW → dmDi
 
 | 方向 | 类型 | 内容 | 用途 |
 |------|------|------|------|
-| 后端→前端 | JSON (init) | `{user, format}` | 连接建立后立即发送，告知用户名和编码格式 |
+| 后端→前端 | JSON | `{challenge}` | 认证挑战（`-password` 非空时连接建立后的第一条消息） |
+| 后端→前端 | JSON | `{auth_result, auth_msg}` | 认证失败原因：`bad_password` / `denied` / `timeout`，随后以 Close 帧（code 1008）断开 |
+| 前端→后端 | JSON | `{auth}` | 认证应答：`sha256(challenge+password)` 或 `anonymous`。**必须是认证窗口内第一条消息** |
+| 后端→前端 | JSON (init) | `{user, format}` | 认证放行后发送，告知用户名和编码格式 |
 | 前端→后端 | JSON (ctrlMsg) | `{screen/quality/maxw/webcodecs/fps}` | 流参数调整（仅控制者可调） |
 | 前端→后端 | JSON (ctrlMsg) | `{control: bool}` | 请求/释放控制权 |
 | 前端→后端 | JSON (ctrlMsg) | `{mx/my/mb/md/rx/ry}` | 鼠标事件（移动/按钮/拖拽） |
@@ -117,7 +120,8 @@ ScreenCanvas.vue                Canvas 渲染 + 鼠标事件 + H.264/JPEG 解码
 StatsDisplay.vue                移动端最小化统计（用户名/fps/KB）
 ConnectionOverlay.vue           断线重连覆盖层（倒计时 + "立即重连"按钮）
 
-composables/useWebSocket.ts     WS 连接管理 + WebRTC 信令转发，指数退避重连（5s→10s→20s→最大30s）
+composables/useWebSocket.ts     WS 连接管理（认证握手状态机 + WebRTC 信令转发），指数退避重连（5s→10s→20s→最大30s）
+utils/sha256.ts                 SHA-256 摘要：WebCrypto 优先 + 非安全上下文纯 JS 回退（认证用）
 composables/useWebRTC.ts        WebRTC 接收端：RTCPeerConnection + hidden video 元素解码 + rAF 绘制到 canvas
 composables/useKeyboardCapture.ts  全局键盘捕获，跟踪按下键，失焦/断连时释放所有键，拦截浏览器快捷键
 composables/useCoordinateMapping.ts  浏览器像素→远程桌面物理坐标映射（letterbox/pillarbox + DPI）
@@ -221,7 +225,10 @@ types/index.ts                  TypeScript 类型定义
 - 档位变化：先 `teardownSession()`（unsubscribe；若是该档位最后观众即自动停并释放采集 feed），再 `acquireTier(id, maxW, fps)` 加入/新建档位会话
 - ws.go 帧循环于本迭代内原子读取后立即判定档位是否变化（curScreen/maxW/fps 任一变化 → 切档位；画质维度已移除）
 - Win32 UI（权限弹窗）必须 `runtime.LockOSThread()` + 消息循环结束 `UnlockOSThread()`
-- **WebRTC 时序**：前端必须在 `connectionStatus === 'connected'` 后（或已在 connected 状态时）初始化 WebRTC，否则 `store.send()` 因 WS 未 OPEN 而静默丢弃 `{rtc_webrtc: true}`
+- **WebRTC 时序**：前端必须在 `connectionStatus === 'connected'` 且认证放行后（或已在 connected 状态时）初始化 WebRTC，否则 `store.send()` 因 WS 未 OPEN 而静默丢弃 `{rtc_webrtc: true}`
+- **认证握手独占性（关键）**：后端认证窗口内读取的消息只认第一条为 auth 应答，任何抢发的控制消息都会被判为非认证消息。因此前端 `connectionStatus` 在认证放行（收到 `{user,format}`）之后才置 `connected`，认证完成前的 `store.send()` 一律入队（`store.wsReady`/`markReady()`），认证摘要走 `store.sendRaw()` 直写 socket。**破坏这条会在安全上下文（127.0.0.1/localhost/https）下直接登录失败**——`ScreenCanvas` 挂载即发 `{rtc_webrtc:true}` 是历史上踩过的坑
+- **crypto.subtle 仅安全上下文可用**：`http://<局域网IP>:9000`（非安全上下文）下 `crypto.subtle` 为 `undefined`，SHA-256 摘要必须走 `@/utils/sha256.ts` 的纯 JS 回退，禁止直接调用 `crypto.subtle.digest`
+- **认证失败必须回传原因**：后端拒绝时调用 `notifyAuthFailure()`（JSON `auth_result`/`auth_msg` + Close 帧 reason + 读应答避免 RST），前端在登录弹窗显示 `store.authError`
 - **WebRTC 双路避让**：`useWebSocket.ts` 的二进制帧 handler 在 `isWebRTCConnected()` 为 true 时跳过——避免同一画面被 WebRTC 和 WS 双重渲染
 - **WebRTC 生命周期**：`ScreenCanvas` 的 `watch connectionStatus` 在 `disconnected/failed` 时自动 `webrtc.close()`；`watch streamFormat` 切换为 `jpeg` 时关闭 WebRTC（JPEG 不适用 RTP）
 - **pion per-tier 视频轨**：`tierTracks[trackKey]`(显示器-maxW-fps) 每档位一条 `TrackLocalStaticSample`；用户 PeerConnection 订阅其当前档位轨，档位/显示器变化时 `restartRTC` 通知前端重建。`WriteSample` 非阻塞，无订阅者时静默丢弃——禁止反压阻塞档位产帧

@@ -50,6 +50,8 @@
           placeholder="输入密码（留空=匿名访问）"
           @keyup.enter="onConfirmName"
         />
+        <!-- 认证失败原因（密码错误 / 被宿主拒绝 / 认证超时） -->
+        <p v-if="store.authError" class="name-dialog-error">{{ store.authError }}</p>
         <div class="name-dialog-actions">
           <n-button type="primary" size="medium" @click="onConfirmName">
             进入
@@ -90,6 +92,7 @@ function onConfirmName() {
   const name = tempName.value.trim();
   if (!name) return;
   showNameDialog.value = false;
+  store.authError = '';
   const pwd = tempPassword.value.trim();
   init(name, pwd || undefined);
 }
@@ -101,7 +104,9 @@ onMounted(async () => {
 
 // 连接断开后回到初始弹窗，让用户可修改名字/密码后重新进入
 watch(() => store.connectionStatus, (status) => {
-  if ((status === 'disconnected' || status === 'failed') && store.wasConnected) {
+  // wasConnected：连上后断开（含认证失败/超时）
+  // !showNameDialog：压根没连上就失败（如后端未启动、地址不通），也要能退回弹窗
+  if ((status === 'disconnected' || status === 'failed') && (store.wasConnected || !showNameDialog.value)) {
     store.wasConnected = false;
     store.clearReconnectTimer();
     store.showReconnectHint = false;
@@ -169,6 +174,13 @@ body {
   color: #999;
   font-size: 16px;
   font-weight: 400;
+}
+
+.name-dialog-error {
+  margin: 12px 0 0 0;
+  color: #e74c3c;
+  font-size: 14px;
+  font-weight: 500;
 }
 
 .name-dialog-actions {

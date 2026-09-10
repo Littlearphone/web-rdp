@@ -8,6 +8,7 @@
 
 import { useAppStore } from '@/stores/app';
 import { isWebRTCActive, type WebRTCControl } from '@/composables/useWebRTC';
+import { sha256Hex } from '@/utils/sha256';
 import type { InitMsg, StatsMsg, ControlStatusMsg, StreamFormat } from '@/types';
 
 type BinaryHandler = (data: ArrayBuffer, format: 'h264' | 'jpeg') => void;
@@ -42,14 +43,7 @@ export function registerWebRTCRestartHandler(fn: () => void) {
   webRTCRestartHandler = fn;
 }
 
-/** SHA-256 摘要（用于认证 challenge-response） */
-async function sha256Hex(s: string): Promise<string> {
-  const buf = new TextEncoder().encode(s);
-  const hash = await crypto.subtle.digest('SHA-256', buf);
-  return Array.from(new Uint8Array(hash))
-    .map(b => b.toString(16).padStart(2, '0'))
-    .join('');
-}
+/** SHA-256 摘要（认证 challenge-response）由 @/utils/sha256 提供：WebCrypto 优先，非安全上下文回退纯 JS */
 
 export function useWebSocket() {
   const store = useAppStore();
@@ -230,6 +224,8 @@ export function useWebSocket() {
     store.lastResKey = '';
     store.connectionStatus = 'connecting';
     store.streamFormat = (store.useH264 && store.canH264) ? 'h264' : 'jpeg';
+    store.resetReady(); // 认证完成前禁止发送，避免污染认证握手
+    store.authError = ''; // 上一次的认证失败提示（本次重试重新判定）
 
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
     let wsUrl = `${proto}://${store.serverAddr}/ws`;
@@ -242,53 +238,95 @@ export function useWebSocket() {
     wsInst.binaryType = 'arraybuffer';
 
     // ── 认证握手状态机 ──
-    let authDone = false;
+    // 后端认证期间只读第一条消息作为 auth 应答：握手完成前必须保持静默
+    // （store.send 会入队），否则连密码正确也会被判定为认证失败。
+    let authState: 'wait' | 'sent' | 'done' = 'wait';
+
+    /** 认证失败：把原因交给登录弹窗，并阻止自动重连（重试同样会失败） */
+    const failAuth = (msg: string) => {
+      authState = 'done';
+      wsInst.onmessage = onMessage;
+      store.authError = msg;
+      store.clearReconnectTimer();
+      store.showReconnectHint = false;
+      // 保持 wasConnected=true，交由 App.vue 的 watch 收起重连并弹回登录框
+      store.connectionStatus = 'failed';
+    };
 
     wsInst.onopen = () => {
       store.wasConnected = true;
-      store.connectionStatus = 'connected';
       store.reconnectDelay = 5;
+      // 认证未完成前不宣告 connected：组件在 connected 时会立即发消息
+      // （如 ScreenCanvas 的 {rtc_webrtc:true}），那会打断认证握手。
 
-      // 首条消息一定是 {challenge} 或 {user, format}
-      // 我们把消息处理器临时包装一层来拦截首条消息
+      // 首条消息一定是 {challenge} 或 {user, format}，临时包装消息处理器拦截握手
       const origHandler = wsInst.onmessage;
       wsInst.onmessage = async (ev: MessageEvent) => {
-        if (authDone) {
+        if (authState === 'done') {
           origHandler?.call(wsInst, ev);
           return;
         }
 
+        let init: (InitMsg & { auth_result?: string; auth_msg?: string }) | null = null;
         if (typeof ev.data === 'string') {
           try {
-            const init = JSON.parse(ev.data);
-            // 收到 challenge → 需要认证
-            if (init.challenge) {
-              const challenge = init.challenge;
-              let authToken: string;
-              if (savedPassword) {
-                authToken = await sha256Hex(challenge + savedPassword);
-              } else {
-                authToken = 'anonymous';
-              }
-              store.send({ auth: authToken });
-              authDone = true;
-              // 恢复原始处理器，后续消息（包含 user/format）正常处理
-              wsInst.onmessage = origHandler;
-              return;
-            }
-          } catch (_) {}
+            init = JSON.parse(ev.data);
+          } catch (_) {
+            init = null;
+          }
         }
 
-        // 无 challenge → 无需认证，直接进入正常流程
-        authDone = true;
-        wsInst.onmessage = origHandler;
-        origHandler?.call(wsInst, ev);
+        if (init) {
+          // 认证失败/超时/被拒：后端发完原因就断开
+          if (init.auth_result) {
+            failAuth(init.auth_msg || '认证失败，请重试');
+            return;
+          }
+
+          // ① 收到 challenge → 回认证摘要（直接写 socket，绕过发送队列）
+          if (init.challenge) {
+            authState = 'sent';
+            try {
+              const token = savedPassword
+                ? await sha256Hex(init.challenge + savedPassword)
+                : 'anonymous';
+              store.sendRaw({ auth: token });
+            } catch (e) {
+              failAuth('认证摘要计算失败：' + (e instanceof Error ? e.message : String(e)));
+            }
+            return;
+          }
+
+          // ② 收到放行消息 {user, format} → 认证完成
+          if (init.user !== undefined || init.format !== undefined) {
+            authState = 'done';
+            wsInst.onmessage = origHandler;
+            origHandler?.call(wsInst, ev); // 先按格式消息处理（可能切 streamFormat）
+            store.markReady();             // 补发认证期间积压的消息
+            store.connectionStatus = 'connected';
+            return;
+          }
+        }
+
+        // 握手期间的其他消息（二进制帧等）一律忽略
       };
     };
 
     wsInst.onmessage = onMessage;
 
     wsInst.onclose = (ev: CloseEvent) => {
+      if (authState !== 'done') {
+        // 认证过程中的断开（无 auth_result 时的兜底：如后端 30s 超时）
+        store.connectionStatus = 'failed';
+        store.clearReconnectTimer();
+        store.showReconnectHint = false;
+        // 后端失败时会带 Close 帧 reason，作为原因消息未送达时的兜底
+        if (!store.authError) {
+          store.authError = ev.reason
+            || (authState === 'wait' ? '无法连接服务器，请检查地址与服务是否已启动' : '认证未完成，请重试');
+        }
+        return;
+      }
       store.connectionStatus = 'disconnected';
       // 4001 = 同 IP 新连接顶替，不重连
       // 不在此处设置 wasConnected = false，由 App.vue 的 watch 检测并弹出登录框

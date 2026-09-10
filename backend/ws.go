@@ -49,6 +49,27 @@ func userNameFor(ip string) string {
 	return name
 }
 
+// notifyAuthFailure 在认证失败时把原因回传客户端后再断开。
+// 前端据此在登录弹窗里显示"密码错误/被拒绝/超时"，而不是只看到连接莫名断开。
+//
+// 必须走一次关闭握手：直接 conn.Close() 在有未读数据时会让内核发 RST，
+// 浏览器会丢弃刚收到的那条原因消息，前端就只剩"连接断开"可显示。
+func notifyAuthFailure(conn *websocket.Conn, result, msg string) {
+	if b, err := json.Marshal(map[string]string{"auth_result": result, "auth_msg": msg}); err == nil {
+		_ = conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
+		_ = conn.WriteMessage(websocket.TextMessage, b)
+	}
+	// Close 帧 reason 携带同样信息，作为原因帧丢失时的兜底
+	_ = conn.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.ClosePolicyViolation, msg),
+		time.Now().Add(3*time.Second))
+	// 读取客户端的 Close 应答：确保对端已取走原因帧，关闭干净（避免 RST）
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	_, _, _ = conn.ReadMessage()
+	_ = conn.SetReadDeadline(time.Time{})
+	_ = conn.SetWriteDeadline(time.Time{})
+}
+
 // handleWS 处理单个 WebSocket 连接的生命周期。
 // 启动后持续读取控制消息并推流：H.264 走进程内 native(MF) 会话（唯一 H.264 源），
 // native 产不出帧或用户关 H.264 时落到纯 Go JPEG 回退。断开时自动清理资源。
@@ -112,24 +133,32 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			_ = conn.WriteMessage(websocket.TextMessage, b)
 		}
 
-		// 设置 30 秒认证超时
-		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
-		_, msgBytes, err := conn.ReadMessage()
+		// 30 秒认证超时（绝对截止时间：客户端抢发消息不能延长窗口）
+		deadline := time.Now().Add(30 * time.Second)
+		var authToken string
+		for authToken == "" {
+			_ = conn.SetReadDeadline(deadline)
+			_, msgBytes, err := conn.ReadMessage()
+			if err != nil {
+				_ = conn.SetReadDeadline(time.Time{})
+				log.Printf("[%s] 认证超时或读取失败: %v", userName, err)
+				notifyAuthFailure(conn, "timeout", "认证超时，请重新连接")
+				return
+			}
+			var authMsg struct {
+				Auth *string `json:"auth"`
+			}
+			// 客户端可能在收到 challenge 前就抢发控制消息（组件挂载即发送
+			// {rtc_webrtc:true}/设置项）。这类消息不是认证应答：丢弃并继续等待，
+			// 否则认证会因"首条消息非 auth"而误判失败。
+			if json.Unmarshal(msgBytes, &authMsg) != nil || authMsg.Auth == nil {
+				log.Printf("[%s] 忽略认证前的非认证消息: %.80s", userName, msgBytes)
+				continue
+			}
+			authToken = *authMsg.Auth
+		}
 		_ = conn.SetReadDeadline(time.Time{}) // 清除超时
-		if err != nil {
-			log.Printf("[%s] 认证超时或读取失败: %v", userName, err)
-			return
-		}
 
-		var authMsg struct {
-			Auth *string `json:"auth"`
-		}
-		if json.Unmarshal(msgBytes, &authMsg) != nil || authMsg.Auth == nil {
-			log.Printf("[%s] 无效的认证消息", userName)
-			return
-		}
-
-		authToken := *authMsg.Auth
 		if authToken == "anonymous" {
 			// 匿名访问 → 弹出宿主审批弹窗
 			log.Printf("[%s] 请求匿名访问，等待宿主审批...", userName)
@@ -146,6 +175,7 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			result := <-done
 			if !result.allowed {
 				log.Printf("[%s] 匿名访问被宿主拒绝", userName)
+				notifyAuthFailure(conn, "denied", "宿主拒绝了访问请求")
 				return
 			}
 			log.Printf("[%s] 匿名访问已批准 (grantCtrl=%v)", userName, result.grantCtrl)
@@ -153,6 +183,8 @@ func handleWS(conn *websocket.Conn, r *http.Request) {
 			// 密码认证
 			if !verifyAuth(challenge, authToken, authPassword) {
 				log.Printf("[%s] 密码验证失败", userName)
+				// 明确告知失败原因，避免前端只能看到"连接断开"而不知道密码错了
+				notifyAuthFailure(conn, "bad_password", "访问密码错误")
 				return
 			}
 			log.Printf("[%s] 密码验证通过", userName)
